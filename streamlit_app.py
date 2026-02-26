@@ -57,7 +57,8 @@ def fetch_resource(session, base_url, resource_name):
 
 def normalize_tail(tail):
     if not tail: return "UNKNOWN"
-    return str(tail).upper().replace("-", "").replace(" ", "")
+    # This aggressively strips out "(Raven)" or spaces so OOMOO always matches OOMOO
+    return str(tail).split(' ')[0].upper().replace("-", "").strip()
 
 @st.cache_data
 def convert_df_to_csv(df):
@@ -82,17 +83,18 @@ def fetch_and_merge_data_v2(end_date):
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
         
-        reg_raw = str(fields.get('aircraft') or "Unknown")
+        reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
-        reg_merge = normalize_tail(reg_display)
+        reg_merge = normalize_tail(reg_raw)
         seen_tails[reg_merge] = reg_display
         
-        maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
+        # Look for the title in multiple possible fields
+        maint_type_str = str(fields.get('aircraftMaintenanceType') or fields.get('name') or fields.get('title') or fields.get('type') or "Standard Inspection")
         maint_lower = maint_type_str.lower()
 
-        # Aggressively hunt for dates in various fields
+        # Aggressively hunt for dates
         due_date = None
-        for d_key in ['max_valid_until', 'expiration_date', 'valid_until', 'due_date']:
+        for d_key in ['max_valid_until', 'expiration_date', 'valid_until', 'due_date', 'date']:
             raw_date = fields.get(d_key)
             if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
                 try: 
@@ -102,8 +104,8 @@ def fetch_and_merge_data_v2(end_date):
                         break
                 except: pass
 
-        # Catch Documents (Case insensitive)
-        is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance", "arc", "certificate"])
+        # Catch Documents (Checking broadly for key terms)
+        is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance", "arc", "certificate", "review"])
         
         if is_doc:
             docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
@@ -132,6 +134,25 @@ def fetch_and_merge_data_v2(end_date):
                 'Limit': 0.0, 'Type': "Monitoring Schedule", 'Interval': 100.0, 'Potential': 999.0, 'Due Date': None
             })
 
+    # Fallback API check for documents just in case
+    for ep in ["aircraft-documents", "documents", "aircraft-certificates"]:
+        d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", ep)
+        if d_json and 'resources' in d_json:
+            for r in d_json.get('resources', []):
+                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or "Unknown")
+                reg_merge = normalize_tail(reg_raw)
+                reg_display = reg_raw.split(' ')[0].strip().upper()
+                
+                doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or "Unknown Document")
+                raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date')
+                if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
+                    try:
+                        parsed_date = pd.to_datetime(str(raw_date)).date()
+                        docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': parsed_date})
+                    except: pass
+            break
+
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
     
     # Process Documents Dataframe
@@ -159,23 +180,42 @@ def fetch_and_merge_data_v2(end_date):
             resp = t_sess.get(api_url, timeout=15)
             if resp.status_code == 200:
                 week_data = resp.json()
-                for h in week_data.get('helis', []): id_map[str(h.get('id', ''))] = h.get('title', '').upper()
+                for h in week_data.get('helis', []): 
+                    id_map[str(h.get('id', ''))] = h.get('title', '')
                 
                 for f in week_data.get('entries', []):
                     if f.get('status') == 'confirmed':
                         start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
                         if now < start <= end_dt:
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
-                            reg = id_map.get(str(f.get('heli_id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()})
+                            reg_raw = id_map.get(str(f.get('heli_id', '')))
+                            if reg_raw: 
+                                book_list.append({
+                                    'MergeKey': normalize_tail(reg_raw), 
+                                    'Registration': reg_raw.split(' ')[0].upper(), 
+                                    'Start': start, 
+                                    'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 
+                                    'Planned': dur, 
+                                    'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
+                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
+                                })
                 
                 for b in week_data.get('blockings', []):
                     start = pd.to_datetime(b.get('start_datetime')).tz_convert(None)
                     if now < start <= end_dt and b.get('helis'):
                         dur = (pd.to_datetime(b.get('end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                         for h in b.get('helis'):
-                            reg = id_map.get(str(h.get('id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description','')})
+                            reg_raw = id_map.get(str(h.get('id', '')))
+                            if reg_raw: 
+                                book_list.append({
+                                    'MergeKey': normalize_tail(reg_raw), 
+                                    'Registration': reg_raw.split(' ')[0].upper(), 
+                                    'Start': start, 
+                                    'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 
+                                    'Planned': dur, 
+                                    'Type': 'Blocking', 
+                                    'Details': b.get('description','')
+                                })
         except: pass
 
     df_books = pd.DataFrame(book_list)
