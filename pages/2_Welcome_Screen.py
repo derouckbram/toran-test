@@ -120,21 +120,20 @@ def get_ebkt_weather():
 weather = get_ebkt_weather()
 
 # --- Aircraft Image & Details Database ---
-# Replace "r44.jpg" and "cabri.jpg" with the exact names of the files you uploaded to GitHub
 AIRCRAFT_DB = {
     "OOHXP": {
-        "model": "Robinson R44 Astro / Raven I",
-        "image": "r44.jpg", 
+        "model": "Robinson R44 Raven II",
+        "image": "raven2.jpg", 
         "seats": "4 Seats",
         "cruise": "109 kts"
     },
     "OOMOO": {
-        "model": "Robinson R44 Raven II",
-        "image": "r44.jpg",
+        "model": "Robinson R44 Raven I",
+        "image": "raven1.jpg",
         "seats": "4 Seats",
         "cruise": "109 kts"
     },
-    "OOXPY": {
+    "OOSKH": {
         "model": "Guimbal Cabri G2",
         "image": "cabri.jpg",
         "seats": "2 Seats",
@@ -282,9 +281,9 @@ else:
     with empty_col1:
         # Try to show a default image here if no flights are running
         try:
-            st.image("r44.jpg", use_container_width=True)
+            st.image("raven2.jpg", use_container_width=True) # Defaults to the Raven II image
         except FileNotFoundError:
-            st.info("Upload your photos to GitHub to see them here!")
+            st.info("Upload your photos ('raven1.jpg', 'raven2.jpg', 'cabri.jpg') to GitHub to see them here!")
         
     with empty_col2:
         st.markdown(f"""
@@ -298,7 +297,8 @@ else:
         st.markdown(f"""
             <div class="info-card" style="text-align: center;">
                 <h3>Our Fleet</h3>
-                <p>Robinson R44 Raven I & II</p>
+                <p>Robinson R44 Raven I</p>
+                <p>Robinson R44 Raven II</p>
                 <p>Guimbal Cabri G2</p>
             </div>
         """, unsafe_allow_html=True)
