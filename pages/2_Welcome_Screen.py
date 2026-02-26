@@ -102,7 +102,6 @@ def apply_tv_style():
 apply_tv_style()
 
 # --- Time & Weather ---
-# Ensure we use Belgium time
 now_be = pd.Timestamp.now('Europe/Brussels')
 
 @st.cache_data(ttl=600)
@@ -119,6 +118,29 @@ def get_ebkt_weather():
         return {"temp": "--°C", "wind": "-- kts", "dir": "--°"}
 
 weather = get_ebkt_weather()
+
+# --- Aircraft Image & Details Database ---
+# Replace "r44.jpg" and "cabri.jpg" with the exact names of the files you uploaded to GitHub
+AIRCRAFT_DB = {
+    "OOHXP": {
+        "model": "Robinson R44 Astro / Raven I",
+        "image": "r44.jpg", 
+        "seats": "4 Seats",
+        "cruise": "109 kts"
+    },
+    "OOMOO": {
+        "model": "Robinson R44 Raven II",
+        "image": "r44.jpg",
+        "seats": "4 Seats",
+        "cruise": "109 kts"
+    },
+    "OOXPY": {
+        "model": "Guimbal Cabri G2",
+        "image": "cabri.jpg",
+        "seats": "2 Seats",
+        "cruise": "90 kts"
+    }
+}
 
 # --- Toran API Logic ---
 def get_authenticated_session(base_url, login_path, email, password):
@@ -213,8 +235,19 @@ if active_flight and active_flight['customer']:
         """, unsafe_allow_html=True)
         
     with col2:
+        # Show Aircraft Image dynamically based on the DB
+        tail_clean = active_flight['tail'].replace("-", "").replace(" ", "")
+        ac_info = AIRCRAFT_DB.get(tail_clean, None)
+        if ac_info:
+            try:
+                st.image(ac_info['image'], use_container_width=True, caption=active_flight['tail'])
+            except FileNotFoundError:
+                pass # Skip if image isn't uploaded yet
+        else:
+            st.markdown("<br>", unsafe_allow_html=True)
+            
         st.markdown(f"""
-            <div class="weather-card">
+            <div class="weather-card" style="margin-top: 20px;">
                 <div style="font-size: 20px; font-weight: bold; color: #E4D18C;">EBKT WEATHER CONDITIONS</div>
                 <div class="weather-temp">{weather['temp']}</div>
                 <div class="weather-desc">Wind: {weather['wind']} at {weather['dir']}</div>
@@ -247,7 +280,11 @@ else:
     empty_col1, empty_col2 = st.columns([1.5, 1])
     
     with empty_col1:
-        st.image("https://images.unsplash.com/photo-1549642646-60840c5f2991", use_container_width=True)
+        # Try to show a default image here if no flights are running
+        try:
+            st.image("r44.jpg", use_container_width=True)
+        except FileNotFoundError:
+            st.info("Upload your photos to GitHub to see them here!")
         
     with empty_col2:
         st.markdown(f"""
@@ -261,8 +298,7 @@ else:
         st.markdown(f"""
             <div class="info-card" style="text-align: center;">
                 <h3>Our Fleet</h3>
-                <p>Robinson R44</p>
+                <p>Robinson R44 Raven I & II</p>
                 <p>Guimbal Cabri G2</p>
-                <p>Robinson R66</p>
             </div>
         """, unsafe_allow_html=True)
