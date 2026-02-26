@@ -252,10 +252,17 @@ def fetch_and_merge_data_v2(end_date):
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
+        
+        # NEW: Find the exact date the breach happens
+        breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index()
+        breach_dates.rename(columns={'Start': 'Breach Date'}, inplace=True)
+        
         usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
+        df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
         df = df_ac.assign(Planned=0)
+        df['Breach Date'] = pd.NaT
 
     df['Forecast'] = df['Potential'] - df['Planned']
     
@@ -295,7 +302,13 @@ if df is not None:
     # --- GLOBAL ALERTS ---
     for _, row in df.iterrows():
         if row['Forecast'] < 0: 
-            st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
+            # If we calculated a precise breach date from the flight logs, display it
+            if pd.notnull(row.get('Breach Date')):
+                breach_str = row['Breach Date'].strftime('%d %b %Y')
+                st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{breach_str}**!", icon="🛑")
+            else:
+                st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
+                
         if pd.notnull(row['Days Left']):
             days = row['Days Left']
             if 0 <= days <= 14: 
