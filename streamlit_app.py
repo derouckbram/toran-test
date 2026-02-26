@@ -14,58 +14,20 @@ def apply_toran_style():
     st.markdown(
         """
         <style>
-        /* 1. Global Background and Typography */
-        .stApp {
-            background-color: #FFFFFF;
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            color: #000000;
-        }
-        
-        /* 2. Style the Tabs */
+        .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
-        .stTabs [data-baseweb="tab"] {
-            background-color: #FFFFFF;
-            border-radius: 4px !important;
-            padding: 10px 20px !important;
-            border: 1px solid #999999;
-            color: #666666;
-            font-weight: 600;
-            transition: all 0.2s ease;
-        }
+        .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
         .stTabs [data-baseweb="tab"]:hover { border-color: #D8BF95; color: #000000; }
-        .stTabs [aria-selected="true"] {
-            background-color: #E4D18C !important;
-            color: #000000 !important;
-            border: 1px solid #E4D18C !important;
-        }
-        
-        /* 3. Metrics Cards */
-        [data-testid="metric-container"] {
-            background-color: #FFFFFF;
-            border: 1px solid #999999;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border-left: 5px solid #E4D18C;
-        }
+        .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
+        [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border-left: 5px solid #E4D18C; }
         [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
         [data-testid="stMetricLabel"] { font-size: 15px !important; font-weight: 600 !important; color: #666666 !important; text-transform: uppercase; }
-
-        /* 4. DataFrames */
-        [data-testid="stDataFrame"] {
-            background-color: #FFFFFF;
-            border-radius: 8px;
-            padding: 15px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border: 1px solid #999999;
-        }
-        
+        [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #999999; }
         h1, h2, h3 { color: #000000 !important; font-weight: 800 !important; }
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; border-radius: 4px; }
         </style>
-        """,
-        unsafe_allow_html=True
+        """, unsafe_allow_html=True
     )
 
 apply_toran_style()
@@ -86,11 +48,9 @@ def get_authenticated_session(base_url, login_path, email, password):
     except: return None
 
 def fetch_resource(session, base_url, resource_name):
-    prefixes = ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]
-    for prefix in prefixes:
-        url = f"{base_url.rstrip('/')}{prefix}{resource_name}"
+    for prefix in ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]:
         try:
-            resp = session.get(url, timeout=10)
+            resp = session.get(f"{base_url.rstrip('/')}{prefix}{resource_name}", timeout=10)
             if resp.status_code == 200: return resp.json()
         except: continue
     return None
@@ -116,30 +76,37 @@ def fetch_and_merge_data_v2(end_date):
 
     ac_data = []
     docs_data = []
+    seen_tails = {}
 
-    # 1. Parse CAMO Maintenances & Extract Documents
+    # 1. Parse CAMO Maintenances & Extract Documents safely
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
         
         reg_raw = str(fields.get('aircraft') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
+        seen_tails[reg_merge] = reg_display
         
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
+        maint_lower = maint_type_str.lower()
 
-        # Parse Date
+        # Aggressively hunt for dates in various fields
         due_date = None
-        raw_date = fields.get('max_valid_until')
-        if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-            try: 
-                parsed_date = pd.to_datetime(str(raw_date)).date()
-                if parsed_date.year > 2000: due_date = parsed_date
-            except: pass
+        for d_key in ['max_valid_until', 'expiration_date', 'valid_until', 'due_date']:
+            raw_date = fields.get(d_key)
+            if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
+                try: 
+                    parsed_date = pd.to_datetime(str(raw_date)).date()
+                    if parsed_date.year > 2000: 
+                        due_date = parsed_date
+                        break
+                except: pass
 
-        # Sort into Documents vs Maintenance
-        if "(Official)" in maint_type_str or "Airworthiness" in maint_type_str or "Insurance" in maint_type_str:
-            if due_date:
-                docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
+        # Catch Documents (Case insensitive)
+        is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance", "arc", "certificate"])
+        
+        if is_doc:
+            docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
         else:
             try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr_val = 0.0
@@ -147,7 +114,6 @@ def fetch_and_merge_data_v2(end_date):
             except: due_val = 0.0
             
             potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
-
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
             if interval <= 0: interval = 100.0 
@@ -157,25 +123,15 @@ def fetch_and_merge_data_v2(end_date):
                 'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
             })
             
-    # Fallback: Check if Documents are stored in a dedicated Nova endpoint
-    for ep in ["aircraft-documents", "documents", "tracked-documents"]:
-        d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", ep)
-        if d_json and 'resources' in d_json:
-            for r in d_json.get('resources', []):
-                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-                reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or "Unknown")
-                reg_display = reg_raw.split(' ')[0].strip().upper()
-                reg_merge = normalize_tail(reg_display)
-                
-                doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or "Unknown Document")
-                raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date')
-                if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-                    try:
-                        parsed_date = pd.to_datetime(str(raw_date)).date()
-                        docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': parsed_date})
-                    except: pass
-            break
-            
+    # Rescue Protocol: Ensure every discovered helicopter has an entry so it doesn't disappear!
+    ac_merges = {d['MergeKey'] for d in ac_data}
+    for merge_key, display_name in seen_tails.items():
+        if merge_key not in ac_merges:
+            ac_data.append({
+                'Registration': display_name, 'MergeKey': merge_key, 'Current': 0.0, 
+                'Limit': 0.0, 'Type': "Monitoring Schedule", 'Interval': 100.0, 'Potential': 999.0, 'Due Date': None
+            })
+
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
     
     # Process Documents Dataframe
@@ -263,13 +219,13 @@ st.title("Operations & Maintenance Forecast")
 
 df, raw_books_df, df_docs = fetch_and_merge_data_v2(selected_date)
 
-if df is not None:
+if df is not None and not df.empty:
     today = pd.Timestamp.now().normalize()
     df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
 
     # --- GLOBAL ALERTS (Maint & Documents) ---
     for _, row in df.iterrows():
-        if row['Forecast'] < 0: 
+        if row['Forecast'] < 0 and row['Potential'] != 999.0: 
             if pd.notnull(row.get('Breach Date')):
                 st.error(f"🛑 **HOURS GROUNDING:** {row['Registration']} breaches flight limit on **{row['Breach Date'].strftime('%d %b %Y')}**!", icon="🛑")
             else:
@@ -282,7 +238,7 @@ if df is not None:
             if pd.notnull(row.get('Days Left')):
                 if row['Days Left'] < 0:
                     st.error(f"🚨 **DOCUMENT EXPIRED:** {row['Document']} for {row['Registration']} expired {abs(int(row['Days Left']))} days ago!", icon="🚨")
-                elif 0 <= row['Days Left'] <= 14:
+                elif 0 <= row['Days Left'] <= 30:
                     st.warning(f"📄 **DOCUMENT DUE:** {row['Document']} for {row['Registration']} expires in {int(row['Days Left'])} days!", icon="⚠️")
 
     st.markdown("---")
@@ -295,6 +251,9 @@ if df is not None:
     with tabs[0]:
         st.subheader("Fleet Summary")
         styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
+        
+        # Hide the 999 potential metric if it's a dummy record
+        styled_df.loc[styled_df['Potential'] == 999.0, ['Limit', 'Potential', 'Life Now %', 'Forecast', 'Life Forecast %']] = None
         styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
         
         st.dataframe(styled_df, 
@@ -309,7 +268,7 @@ if df is not None:
         col_chart1, col_chart2 = st.columns(2)
         with col_chart1:
             st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
-            chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
+            chart_df = df[df['Potential'] != 999.0][['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
             chart_df.columns = ['Remaining Potential', 'Booked Hours']
             st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
         with col_chart2:
@@ -328,28 +287,38 @@ if df is not None:
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
-            c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
-            c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
-            c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
+            
+            # Mask the metrics if it's just a monitoring schedule
+            if ac_df['Potential'] == 999.0:
+                c2.metric("Remaining Potential Now", "N/A")
+                c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
+                c4.metric("Forecasted Potential", "N/A")
+            else:
+                c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
+                c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
+                c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
             
             st.markdown("---")
             col_info, col_bar = st.columns([1, 1])
             with col_info:
                 st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
-                st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                if ac_df['Potential'] != 999.0: st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                
                 if pd.notnull(ac_df['Due Date']):
                     days_text = f"(in {int(ac_df['Days Left'])} days)" if ac_df['Days Left'] >= 0 else "(EXPIRED)"
                     st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')} {days_text}")
                 else: st.write("**📅 Calendar Due Date:** No date set")
                     
                 if pd.notnull(ac_df.get('Breach Date')): st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')} (Based on bookings)")
+                elif ac_df['Potential'] == 999.0: st.write("**✅ Flight Hours Breach Date:** N/A")
                 else: st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
                     
             with col_bar:
-                st.write("**Life Remaining NOW:**")
-                st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
-                st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
-                st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
+                if ac_df['Potential'] != 999.0:
+                    st.write("**Life Remaining NOW:**")
+                    st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
+                    st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
+                    st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
 
             # --- DOCUMENTS SECTION ---
             st.markdown("<br>", unsafe_allow_html=True)
@@ -357,8 +326,15 @@ if df is not None:
             if df_docs is not None and not df_docs.empty:
                 ac_docs = df_docs[df_docs['MergeKey'] == normalize_tail(tail)].copy()
                 if not ac_docs.empty:
-                    ac_docs = ac_docs.sort_values('Days Left')
-                    ac_docs['Status'] = ac_docs['Days Left'].apply(lambda x: "🚨 EXPIRED" if x < 0 else ("⚠️ DUE SOON" if x <= 30 else "✅ VALID"))
+                    ac_docs = ac_docs.sort_values('Days Left', na_position='last')
+                    
+                    def get_status(x):
+                        if pd.isnull(x): return "❔ NO DATE"
+                        if x < 0: return "🚨 EXPIRED"
+                        if x <= 30: return "⚠️ DUE SOON"
+                        return "✅ VALID"
+                        
+                    ac_docs['Status'] = ac_docs['Days Left'].apply(get_status)
                     ac_docs['Due Date'] = ac_docs['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "Unknown")
                     ac_docs['Days Left'] = ac_docs['Days Left'].apply(lambda x: f"{int(x)} days" if pd.notnull(x) else "-")
                     
