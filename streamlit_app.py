@@ -253,7 +253,7 @@ def fetch_and_merge_data_v2(end_date):
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         
-        # NEW: Find the exact date the breach happens
+        # Find the exact date the breach happens
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index()
         breach_dates.rename(columns={'Start': 'Breach Date'}, inplace=True)
         
@@ -302,7 +302,7 @@ if df is not None:
     # --- GLOBAL ALERTS ---
     for _, row in df.iterrows():
         if row['Forecast'] < 0: 
-            # If we calculated a precise breach date from the flight logs, display it
+            # Display precise breach date in alert if available
             if pd.notnull(row.get('Breach Date')):
                 breach_str = row['Breach Date'].strftime('%d %b %Y')
                 st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{breach_str}**!", icon="🛑")
@@ -324,15 +324,16 @@ if df is not None:
     with tabs[0]:
         st.subheader("Fleet Summary")
         
-        # Display Table
-        styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']].copy()
-        styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date']
+        # Display Table with added Breach Date column
+        styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
+        styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
         
         st.dataframe(styled_df, 
                      column_config={
                          "Life Now": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
                          "Life Forecast": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
-                         "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY")
+                         "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
+                         "Est. Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
                      }, 
                      hide_index=True, use_container_width=True)
 
@@ -342,7 +343,6 @@ if df is not None:
             st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
             chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
             chart_df.columns = ['Remaining Potential', 'Booked Hours']
-            # Chart colors: Beige for Remaining, Dark Gray for Booked
             st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
             
         with col_chart2:
@@ -351,7 +351,6 @@ if df is not None:
             if not cal_df.empty:
                 cal_chart = cal_df.sort_values('Days Left')[['Registration', 'Days Left']].set_index('Registration')
                 cal_chart.columns = ['Days Until Maintenance']
-                # Chart colors: Beige for days left
                 st.bar_chart(cal_chart, color="#E4D18C")
             else:
                 st.info("No calendar due dates available.")
@@ -378,11 +377,19 @@ if df is not None:
             with col_info:
                 st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
                 st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                
+                # Calendar Due Date logic
                 if pd.notnull(ac_df['Due Date']):
                     days_text = f"(in {int(ac_df['Days Left'])} days)" if ac_df['Days Left'] >= 0 else "(EXPIRED)"
                     st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')} {days_text}")
                 else:
                     st.write("**📅 Calendar Due Date:** No date set")
+                    
+                # New Breach Date Display logic
+                if pd.notnull(ac_df.get('Breach Date')):
+                    st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')} (Based on bookings)")
+                else:
+                    st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
                     
             with col_bar:
                 st.write("**Life Remaining NOW:**")
@@ -419,5 +426,6 @@ if df is not None:
 
     with st.sidebar:
         st.markdown("---")
-        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date']])
+        # Included Breach Date in the downloadable CSV
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
