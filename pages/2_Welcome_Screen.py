@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import urllib.parse
 from datetime import datetime, timedelta
+import base64  # Added for the clickable image trick
 
 # --- Page Config for TV ---
 st.set_page_config(page_title="Toran Welcome Screen", layout="wide", page_icon="🚁")
@@ -94,6 +95,14 @@ def apply_tv_style():
         }
         .flight-board tr:nth-child(even) { background-color: #F8F8F8; }
         .active-flight td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000000; font-weight: 800; }
+        
+        /* Clickable Logo Hover Effect */
+        .clickable-logo {
+            transition: opacity 0.2s ease;
+        }
+        .clickable-logo:hover {
+            opacity: 0.8;
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -197,13 +206,25 @@ def get_todays_flights():
 # --- UI BUILDER ---
 flights = get_todays_flights()
 
-# Header: Logo on Left, Clock on Right
+# Header: Logo on Left (Clickable), Clock on Right
 head_col1, head_col2 = st.columns([1, 1])
 with head_col1:
     try:
-        st.image("toran_logo.png", width=300)
+        # Convert local image to base64 so it can be wrapped in a hyperlink
+        with open("toran_logo.png", "rb") as image_file:
+            encoded_logo = base64.b64encode(image_file.read()).decode()
+            
+        # The href="/" tells it to return to the main Streamlit page
+        logo_html = f'''
+            <a href="/" target="_self">
+                <img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Forecast Dashboard">
+            </a>
+        '''
+        st.markdown(logo_html, unsafe_allow_html=True)
     except FileNotFoundError:
-        st.markdown('<h1 style="color:#004A80;">TORAN HELICOPTERS</h1>', unsafe_allow_html=True)
+        # Fallback text that is also clickable
+        st.markdown('<a href="/" target="_self" style="text-decoration:none;"><h1 style="color:#000000;" class="clickable-logo">TORAN HELICOPTERS</h1></a>', unsafe_allow_html=True)
+
 with head_col2:
     st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
 
