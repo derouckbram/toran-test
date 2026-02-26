@@ -55,7 +55,6 @@ def fetch_resource(session, base_url, resource_name):
         except: continue
     return None
 
-# Restored EXACT working normalizer
 def normalize_tail(tail):
     if not tail: return "UNKNOWN"
     return str(tail).upper().replace("-", "").replace(" ", "")
@@ -72,56 +71,81 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", None, pd.DataFrame()
 
-    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
-    if not maint_json: return None, "CAMO Data not found", None, pd.DataFrame()
-
     ac_data = []
     docs_data = []
-    
-    # 1. Parse CAMO Maintenances & Extract Documents safely
-    for r in maint_json.get('resources', []):
-        fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-        
-        # EXACT working tail extraction
-        reg_raw = str(fields.get('aircraft') or "Unknown")
-        reg_display = reg_raw.split(' ')[0].strip().upper()
-        reg_merge = normalize_tail(reg_display)
 
-        maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
-        maint_lower = maint_type_str.lower()
-
-        # Dates
-        due_date = None
-        raw_date = fields.get('max_valid_until')
-        if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-            try: 
-                parsed_date = pd.to_datetime(str(raw_date)).date()
-                if parsed_date.year > 2000: due_date = parsed_date
-            except: pass
-
-        # Sort into Documents vs Maintenance
-        is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance"])
-        
-        if is_doc:
-            docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
-        else:
-            try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
-            except: curr_val = 0.0
-            try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
-            except: due_val = 0.0
-            potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
-
-            try:
-                match = re.search(r'(\d+)', maint_type_str)
-                interval = float(match.group(1)) if match else 100.0
-            except: interval = 100.0
-            if interval <= 0: interval = 100.0 
-
-            ac_data.append({
-                'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
-                'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
-            })
+    # 1A. Parse Standard CAMO Maintenances
+    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
+    if maint_json:
+        for r in maint_json.get('resources', []):
+            fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
             
+            reg_raw = str(fields.get('aircraft') or "Unknown")
+            reg_display = reg_raw.split(' ')[0].strip().upper()
+            reg_merge = normalize_tail(reg_display)
+
+            maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
+            maint_lower = maint_type_str.lower()
+
+            due_date = None
+            raw_date = fields.get('max_valid_until')
+            if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
+                try: 
+                    parsed_date = pd.to_datetime(str(raw_date)).date()
+                    if parsed_date.year > 2000: due_date = parsed_date
+                except: pass
+
+            is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance"])
+            
+            if is_doc:
+                docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
+            else:
+                try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
+                except: curr_val = 0.0
+                try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
+                except: due_val = 0.0
+                potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
+
+                try:
+                    match = re.search(r'(\d+)', maint_type_str)
+                    interval = float(match.group(1)) if match else 100.0
+                except: interval = 100.0
+                if interval <= 0: interval = 100.0 
+
+                ac_data.append({
+                    'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
+                    'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
+                })
+
+    # 1B. Parse Official Documents from Dedicated API Endpoint (Using your URL structure)
+    docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "documents")
+    if docs_json and 'resources' in docs_json:
+        for r in docs_json.get('resources', []):
+            fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            
+            # Find the helicopter/aircraft name
+            reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or fields.get('registration') or "Unknown")
+            # Unpack nested dictionaries if Nova returns it as a dict
+            if isinstance(fields.get('aircraft'), dict):
+                reg_raw = fields.get('aircraft').get('display', 'Unknown')
+            
+            reg_display = reg_raw.split(' ')[0].strip().upper()
+            reg_merge = normalize_tail(reg_display)
+            
+            doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
+            
+            # Find Expiration Date
+            raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date') or fields.get('due_date')
+            due_date = None
+            if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
+                try: 
+                    parsed_date = pd.to_datetime(str(raw_date)).date()
+                    if parsed_date.year > 2000: due_date = parsed_date
+                except: pass
+                
+            if reg_merge != "UNKNOWN" and due_date:
+                docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
+
     # Rescue Protocol: Ensure every helicopter with a document doesn't get dropped if it has no hours-based inspection
     ac_merges = {d['MergeKey'] for d in ac_data}
     for d in docs_data:
@@ -131,7 +155,7 @@ def fetch_and_merge_data_v2(end_date):
                 'Limit': 0.0, 'Type': "Monitoring Schedule", 'Interval': 100.0, 'Potential': 999.0, 'Due Date': None
             })
 
-    df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
+    df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey') if ac_data else pd.DataFrame()
     
     # Process Documents Dataframe
     df_docs = pd.DataFrame(docs_data).drop_duplicates() if docs_data else pd.DataFrame(columns=['Registration', 'MergeKey', 'Document', 'Due Date'])
@@ -139,7 +163,7 @@ def fetch_and_merge_data_v2(end_date):
         today_date = pd.Timestamp.now().normalize().date()
         df_docs['Days Left'] = df_docs['Due Date'].apply(lambda x: (x - today_date).days if pd.notnull(x) else None)
 
-    # 2. EXACT working fetch for Toran Bookings
+    # 2. Fetch Toran Bookings
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
@@ -178,7 +202,7 @@ def fetch_and_merge_data_v2(end_date):
         except: pass
 
     df_books = pd.DataFrame(book_list)
-    if not df_books.empty:
+    if not df_books.empty and not df_ac.empty:
         df_books = df_books.sort_values(by=['MergeKey', 'Start'])
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
@@ -191,14 +215,15 @@ def fetch_and_merge_data_v2(end_date):
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
-        df = df_ac.assign(Planned=0)
-        df['Breach Date'] = pd.NaT
+        df = df_ac.assign(Planned=0) if not df_ac.empty else pd.DataFrame()
+        if not df.empty: df['Breach Date'] = pd.NaT
 
-    df['Forecast'] = df['Potential'] - df['Planned']
-    df['Life Now %'] = (df['Potential'] / df['Interval']) * 100
-    df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
-    df['Life Forecast %'] = (df['Forecast'] / df['Interval']) * 100
-    df['Life Forecast %'] = df['Life Forecast %'].clip(lower=0, upper=100)
+    if not df.empty:
+        df['Forecast'] = df['Potential'] - df['Planned']
+        df['Life Now %'] = (df['Potential'] / df['Interval']) * 100
+        df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
+        df['Life Forecast %'] = (df['Forecast'] / df['Interval']) * 100
+        df['Life Forecast %'] = df['Life Forecast %'].clip(lower=0, upper=100)
     
     return df, df_books, df_docs
 
