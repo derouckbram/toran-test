@@ -35,6 +35,10 @@ def normalize_tail(tail):
     if not tail: return "UNKNOWN"
     return str(tail).upper().replace("-", "").replace(" ", "")
 
+@st.cache_data
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
+
 # --- DATA ENGINE ---
 @st.cache_data(ttl=300)
 def fetch_maintenance_data(end_date):
@@ -172,6 +176,7 @@ with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError: pass 
     st.markdown("---")
+    st.write("Go to **pages/welcome_page** for TV Mode")
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
@@ -216,3 +221,8 @@ if df is not None:
                     ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
                     if not ac_b.empty: st.dataframe(ac_b[['Start', 'Type', 'Details', 'Instructor', 'Planned']], hide_index=True)
                     else: st.info("No bookings found.")
+    
+    with st.sidebar:
+        st.markdown("---")
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+        st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
