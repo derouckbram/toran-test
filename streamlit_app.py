@@ -88,10 +88,6 @@ def normalize_tail(tail):
     if not tail: return "UNKNOWN"
     return str(tail).upper().replace("-", "").replace(" ", "")
 
-@st.cache_data
-def convert_df_to_csv(df):
-    return df.to_csv(index=False).encode('utf-8')
-
 def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
@@ -143,10 +139,8 @@ def fetch_and_merge_data_v2(end_date):
                             except: pass
             defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': status.capitalize(), 'Description': desc_clean, 'Due Date': due_clean})
     df_defects = pd.DataFrame(defects_list)
-    
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
-    
     book_list, now = [], pd.Timestamp.utcnow().tz_localize(None)
     for i in range(2): 
         target = now + pd.Timedelta(weeks=i)
@@ -174,7 +168,7 @@ def fetch_and_merge_data_v2(end_date):
     df['Life Now %'] = ((df['Potential'] / df['Interval']) * 100).clip(0, 100)
     return df, df_books, df_defects
 
-# --- UI Mode Persistence ---
+# --- UI Setup ---
 if "mode" in st.query_params and st.query_params["mode"] == "tv": default_idx = 1
 else: default_idx = 0
 
@@ -189,22 +183,48 @@ with st.sidebar:
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
+# ==========================================
+# MODE 1: MAINTENANCE DASHBOARD (RESTORED)
+# ==========================================
 if app_mode == "Maintenance Dashboard":
     st.title("Operations & Maintenance Forecast")
     if df is not None:
         tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
         tabs = st.tabs(tab_names)
-        with tabs[0]: st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Due Date']], hide_index=True, use_container_width=True)
+        
+        with tabs[0]:
+            st.subheader("Fleet Summary")
+            st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Due Date']], hide_index=True, use_container_width=True)
+            
         for i, tail in enumerate(tab_names[1:], start=1):
             with tabs[i]:
                 ac_df = df[df['Registration'] == tail].iloc[0]
-                st.subheader("🛠️ Open Defects")
-                # Error Fix: Safe check for empty defects
+                
+                # Metrics Row
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Current TSN", f"{ac_df['Current']:.1f}h")
+                c2.metric("Life Potential", f"{ac_df['Potential']:.1f}h")
+                c3.metric("Booked Flights", f"{ac_df['Planned']:.1f}h")
+                c4.metric("Forecasted End", f"{ac_df['Forecast']:.1f}h")
+                
+                # Defects Section
+                st.markdown("---")
+                st.subheader("🛠️ Open Defects (HIL / DDL)")
                 if not df_defects.empty and 'MergeKey' in df_defects.columns:
                     ac_def = df_defects[df_defects['MergeKey'] == normalize_tail(tail)]
-                    if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True, use_container_width=True)
-                    else: st.info("No open defects.")
-                else: st.info("No open defects.")
+                    if not ac_def.empty:
+                        st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True, use_container_width=True)
+                    else: st.info("✅ No open defects for this aircraft.")
+                else: st.info("✅ No open defects.")
+                
+                # Schedule Section
+                st.markdown("---")
+                st.subheader("📋 Scheduled Log")
+                if not raw_books_df.empty:
+                    ac_books = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
+                    if not ac_books.empty:
+                        st.dataframe(ac_books[['Start', 'Type', 'Details', 'Departure', 'Planned']], hide_index=True, use_container_width=True)
+                    else: st.info("No bookings found for this period.")
 
 # ==========================================
 # MODE 2: GUEST WELCOME SCREEN
@@ -215,54 +235,45 @@ elif app_mode == "Guest Welcome Screen":
         inline_logo = f'<a href="/?mode=admin" target="_self"><img src="data:image/jpeg;base64,{data}" style="height:70px; vertical-align:middle; margin-left:15px; border-radius:8px; cursor: pointer;"></a>'
     except: inline_logo = '<a href="/?mode=admin" target="_self" style="text-decoration:none;">🚁</a>'
 
-    st.markdown(f"""
-        <meta http-equiv="refresh" content="600">
+    st.markdown("""<meta http-equiv="refresh" content="60">
         <style>
-        [data-testid="collapsedControl"], [data-testid="stSidebar"], header {{ display: none !important; }}
-        .stApp {{ margin-top: -100px !important; }}
-        .welcome-title {{ font-size: 78px; font-weight: 900; color: #000; line-height: 1; margin-bottom: 5px; }}
-        .welcome-subtitle {{ font-size: 34px; font-weight: 600; color: #666; margin-bottom: 25px; }}
-        .clock-text {{ font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }}
-        .info-card {{ background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.05); margin-bottom:20px; }}
-        .weather-card {{ background-color: #000; color: #FFF; padding: 20px; border-radius: 12px; }}
-        .weather-val {{ font-size: 26px; font-weight: 800; color: #E4D18C; }}
-        .weather-lbl {{ font-size: 13px; color: #999; text-transform: uppercase; font-weight:700; }}
-        .flight-board {{ width: 100%; border-collapse: collapse; font-size: 20px; }}
-        .flight-board th {{ background-color: #E4D18C; padding: 12px; text-align: left; font-weight: 800; }}
-        .flight-board td {{ padding: 12px; border-bottom: 1px solid #EEE; color: #666; font-weight: 600; }}
-        .active-row td {{ background-color: rgba(228, 209, 140, 0.2) !important; color: #000 !important; font-weight: 800; }}
+        [data-testid="collapsedControl"], [data-testid="stSidebar"], header { display: none !important; }
+        .stApp { margin-top: -100px !important; }
+        .welcome-title { font-size: 78px; font-weight: 900; color: #000; line-height: 1; margin-bottom: 5px; }
+        .welcome-subtitle { font-size: 34px; font-weight: 600; color: #666; margin-bottom: 25px; }
+        .clock-text { font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }
+        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.05); margin-bottom:20px; }
+        .weather-card { background-color: #000; color: #FFF; padding: 20px; border-radius: 12px; }
+        .weather-val { font-size: 26px; font-weight: 800; color: #E4D18C; }
+        .weather-lbl { font-size: 13px; color: #999; text-transform: uppercase; font-weight:700; }
+        .flight-board { width: 100%; border-collapse: collapse; font-size: 20px; }
+        .flight-board th { background-color: #E4D18C; padding: 12px; text-align: left; font-weight: 800; }
+        .flight-board td { padding: 12px; border-bottom: 1px solid #EEE; color: #666; font-weight: 600; }
+        .active-row td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000 !important; font-weight: 800; }
         </style>
         <script>
-        function updateClock() {{
+        function updateClock() {
             const now = new Date();
-            const timeStr = now.toLocaleTimeString('en-GB', {{ hour: '2-digit', minute: '2-digit', second: '2-digit' }}) + ' Local';
+            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' Local';
             const clockEl = document.getElementById('live-clock');
             if (clockEl) clockEl.innerText = timeStr;
-        }}
+        }
         setInterval(updateClock, 1000);
         </script>
     """, unsafe_allow_html=True)
 
     now_be = pd.Timestamp.now('Europe/Brussels')
-    
-    # 2-Column Split
     col_left, col_right = st.columns([1.8, 1])
 
     with col_right:
-        # Clock, Logo, Departures board stacked on right
         st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M:%S")} Local</div>', unsafe_allow_html=True)
         st.markdown(f'<div style="text-align:right; margin: 10px 0 20px 0;">{inline_logo}</div>', unsafe_allow_html=True)
-        
         if not raw_books_df.empty:
             raw_books_df['LStart'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
             today_flights = raw_books_df[(raw_books_df['LStart'].dt.date == now_be.date()) & (raw_books_df['Type'] != 'Blocking')].sort_values('LStart')
-            
-            # Identify current active flight
             active_flight = None
             for _, f in today_flights.iterrows():
-                if f['LStart'] > now_be - pd.Timedelta(minutes=15):
-                    active_flight = f; break
-
+                if f['LStart'] > now_be - pd.Timedelta(minutes=15): active_flight = f; break
             st.markdown("<h3 style='font-size:24px; font-weight:800; border-bottom:3px solid #E4D18C; display:inline-block; margin-bottom:10px;'>TODAY'S DEPARTURES</h3>", unsafe_allow_html=True)
             tbl = '<table class="flight-board"><tr><th>Time</th><th>Tail</th><th>Guest</th></tr>'
             for _, f in today_flights.iterrows():
@@ -271,21 +282,18 @@ elif app_mode == "Guest Welcome Screen":
             st.markdown(tbl + '</table>', unsafe_allow_html=True)
 
     with col_left:
-        # Welcome Logic
         if active_flight is not None:
             guest = str(active_flight['Details']) if str(active_flight['Details']).strip() else "Guest"
             st.markdown(f'<div class="welcome-title">Welcome, {guest}!</div>', unsafe_allow_html=True)
             st.markdown('<div class="welcome-subtitle">Prepped and ready for departure</div>', unsafe_allow_html=True)
-            
             st.markdown(f"""<div class="info-card"><h3 style="margin:0;">🚁 Flight Details</h3><br>
                 <p style="font-size:24px; margin:0;"><b>Departs:</b> {active_flight["LStart"].strftime("%H:%M")} Local</p>
                 <p style="font-size:24px; margin:0;"><b>Airport:</b> {active_flight.get("Departure", "EBKT")}</p>
-                <p style="font-size:24px; margin:0;"><b>Aircraft:</b> {active_flight["Registration"]}</p></div>""", unsafe_allow_html=True)
+                <p style="font-size:24px; margin:0;"><b>Tail:</b> {active_flight["Registration"]}</p></div>""", unsafe_allow_html=True)
         else:
             st.markdown(f'<div class="welcome-title">Welcome to Toran</div>', unsafe_allow_html=True)
             st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk (EBKT)</div>', unsafe_allow_html=True)
 
-        # Weather card always visible on left
         st.markdown(f"""<div class="weather-card"><div style="font-size:14px; color:#E4D18C; font-weight:800; margin-bottom:10px;">EBKT PILOT WEATHER</div>
             <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px;">
                 <div><div class="weather-lbl">Temp</div><div class="weather-val">{weather['temp']}</div></div>
@@ -295,8 +303,7 @@ elif app_mode == "Guest Welcome Screen":
                 <div><div class="weather-lbl">Vis</div><div class="weather-val">{weather['vis']}</div></div>
                 <div><div class="weather-lbl">QNH</div><div class="weather-val">{weather['qnh']}</div></div>
             </div></div>""", unsafe_allow_html=True)
-
-        # Photo at bottom left
+        
         st.markdown("<br>", unsafe_allow_html=True)
         tail_c = normalize_tail(active_flight['Registration']) if active_flight is not None else "OOHXP"
         img = AIRCRAFT_DB.get(tail_c, {}).get('image', 'raven2.jpg')
