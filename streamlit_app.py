@@ -210,32 +210,20 @@ def fetch_and_merge_data_v2(end_date):
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
-    # --- ADDRESS BOOK FETCH (Customers) ---
-    cust_map = {}
-    try:
-        cust_resp = t_sess.get("https://admin.toran.be/api/customers", timeout=10)
-        if cust_resp.status_code == 200:
-            c_data = cust_resp.json()
-            c_list = c_data.get('data', c_data) if isinstance(c_data, dict) else c_data
-            for c in c_list:
-                c_id = str(c.get('id', ''))
-                c_name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
-                if not c_name: c_name = str(c.get('name', ''))
-                if c_id and c_name: cust_map[c_id] = c_name
-    except: pass
-
-    # --- PILOT DIRECTORY FETCH (Instructors) ---
+    # --- NEW: PILOT DIRECTORY FETCH (Aggressive Mode) ---
     pilot_map = {}
     try:
         pilot_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10)
         if pilot_resp.status_code == 200:
             p_data = pilot_resp.json()
-            p_list = p_data.get('data', p_data) if isinstance(p_data, dict) else p_data
+            # Handle different Laravel pagination structures seamlessly
+            p_list = p_data.get('data', p_data.get('items', [])) if isinstance(p_data, dict) else p_data
             for p in p_list:
-                p_id = str(p.get('id', ''))
-                p_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
-                if not p_name: p_name = str(p.get('name', ''))
-                if p_id and p_name: pilot_map[p_id] = p_name
+                if isinstance(p, dict):
+                    p_id = str(p.get('id', ''))
+                    p_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+                    if not p_name: p_name = str(p.get('name', ''))
+                    if p_id and p_name: pilot_map[p_id] = p_name
     except: pass
 
     now = pd.Timestamp.utcnow().tz_localize(None)
@@ -266,17 +254,38 @@ def fetch_and_merge_data_v2(end_date):
                             guest_name = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
                             if not guest_name and isinstance(f.get('customer'), dict):
                                 guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
-                            if not guest_name and f.get('customer_id'):
-                                guest_name = cust_map.get(str(f.get('customer_id')), '')
                             if not guest_name and f.get('title'):
                                 guest_name = str(f.get('title'))
                                 
-                            # Instructor Name Logic (Using the Pilot Directory!)
-                            inst_id = str(f.get('instructor_id') or f.get('pilot_id') or '')
-                            instructor_name = pilot_map.get(inst_id)
+                            # --- ULTIMATE INSTRUCTOR HUNTER ---
+                            instructor_name = ""
+                            
+                            # Step 1: Check obvious string fields first
+                            for k in ['pilot_name', 'instructor_name', 'pic_name', 'crew_name']:
+                                if isinstance(f.get(k), str) and f.get(k).strip() and f.get(k).lower() != 'none':
+                                    instructor_name = f.get(k).strip()
+                                    break
+                                    
+                            # Step 2: Extract from nested objects if available
                             if not instructor_name:
-                                instructor_name = str(f.get('instructor_name') or f.get('pilot_name') or 'Toran Team')
-                            if instructor_name.lower() in ['none', 'nan', '']:
+                                for k in ['pilot', 'instructor', 'pic', 'user']:
+                                    if isinstance(f.get(k), dict):
+                                        name = f"{f[k].get('first_name', '')} {f[k].get('last_name', '')}".strip()
+                                        if not name: name = str(f[k].get('name', ''))
+                                        if name and name.lower() != 'none':
+                                            instructor_name = name
+                                            break
+                                            
+                            # Step 3: Match ID against the newly downloaded Pilot Directory
+                            if not instructor_name:
+                                for k in ['pilot_id', 'instructor_id', 'pic_id', 'user_id', 'assigned_user_id']:
+                                    val = str(f.get(k, ''))
+                                    if val in pilot_map:
+                                        instructor_name = pilot_map[val]
+                                        break
+                                        
+                            # Step 4: Fallback
+                            if not instructor_name or instructor_name.lower() in ['none', 'nan', '', 'null']:
                                 instructor_name = 'Toran Team'
                             
                             if reg: 
