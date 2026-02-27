@@ -206,7 +206,7 @@ def fetch_and_merge_data_v2(end_date):
             page += 1
     df_defects = pd.DataFrame(defects_list)
 
-    # 3. Fetch Toran Bookings (Now includes Instructor parsing for Welcome Screen)
+    # 3. Fetch Toran Bookings 
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
@@ -456,18 +456,31 @@ elif app_mode == "Guest Welcome Screen":
     active_flight = None
 
     if not raw_books_df.empty:
+        # Localize both Start and End times
         raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
+        raw_books_df['Local_End'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
+        
+        # Filter for ALL Flights Today
         today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] == 'Flight')].copy()
         
         if not today_flights.empty:
             today_flights = today_flights.sort_values('Local_Start')
             for _, f in today_flights.iterrows():
-                if -30 <= (f['Local_Start'] - now_be).total_seconds() / 60 <= 90:
+                # Find the NEXT chronological flight that has not completely finished yet
+                # (We keep their name on screen until 30 minutes after their flight officially ends)
+                if (f['Local_End'] - now_be).total_seconds() >= -1800:
                     active_flight = f
                     break
 
-    if active_flight is not None and str(active_flight['Details']).strip():
-        st.markdown(f'<div class="welcome-title">Welcome, {active_flight["Details"]}!</div>', unsafe_allow_html=True)
+    # Determine Customer Name Safely
+    guest_name = ""
+    if active_flight is not None:
+        guest_name = str(active_flight['Details']).strip()
+        if not guest_name or guest_name.lower() in ['nan', 'none']:
+            guest_name = "Guest"
+
+    if active_flight is not None:
+        st.markdown(f'<div class="welcome-title">Welcome, {guest_name}!</div>', unsafe_allow_html=True)
         col1, col2 = st.columns([1.5, 1])
         with col1:
             st.markdown(f"""
@@ -504,7 +517,12 @@ elif app_mode == "Guest Welcome Screen":
         board_html = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th><th>Instructor</th></tr>'
         for _, f in today_flights.iterrows():
             row_class = 'class="active-flight"' if (active_flight is not None and active_flight.equals(f)) else ''
-            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{f["Details"]}</td><td>{f["Instructor"]}</td></tr>'
+            
+            # Format the board guest name safely
+            board_guest = str(f["Details"]).strip()
+            if not board_guest or board_guest.lower() in ['nan', 'none']: board_guest = "Guest"
+                
+            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{board_guest}</td><td>{f["Instructor"]}</td></tr>'
         board_html += '</table>'
         st.markdown(board_html, unsafe_allow_html=True)
     else:
