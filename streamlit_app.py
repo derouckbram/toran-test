@@ -165,7 +165,6 @@ def fetch_and_merge_data_v2(end_date):
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     ac_data = []
-    aircraft_registry = {} # To store the internal IDs for fetching defects
     
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
@@ -173,15 +172,6 @@ def fetch_and_merge_data_v2(end_date):
         reg_raw = str(fields.get('aircraft') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
-
-        # Extract internal Nova ID for the aircraft
-        ac_id = None
-        for f in r.get('fields', []):
-            if f.get('attribute') == 'aircraft':
-                ac_id = f.get('belongsToId')
-        
-        if ac_id and reg_merge != "UNKNOWN":
-            aircraft_registry[reg_merge] = ac_id
 
         # Hours
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
@@ -219,12 +209,12 @@ def fetch_and_merge_data_v2(end_date):
     
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # --- 2. THE ADVANCED DEFECT VACUUM CLEANER ---
+    # --- 2. DEEP DIVE DEFECT VACUUM CLEANER ---
     defects_list = []
-    # Hit the master endpoints for both DDL and HIL
     for endpoint in ['ddl-defects', 'hil-defects']:
         page = 1
         while True:
+            # Step A: Get the list of defects
             d_url = f"{endpoint}?perPage=100&page={page}"
             d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", d_url)
             
@@ -232,16 +222,16 @@ def fetch_and_merge_data_v2(end_date):
                 break
                 
             for r in d_json.get('resources', []):
-                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                index_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                 
-                # Extract internal defect ID (needed to look up limitations)
+                # Extract internal defect ID
                 defect_id = r.get('id')
                 if isinstance(defect_id, dict):
                     defect_id = defect_id.get('value')
                 
                 # Identify the Aircraft
-                reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or fields.get('registration') or "")
-                if isinstance(fields.get('aircraft'), dict): reg_raw = fields.get('aircraft').get('display', reg_raw)
+                reg_raw = str(index_fields.get('aircraft') or index_fields.get('helicopter') or index_fields.get('registration') or "")
+                if isinstance(index_fields.get('aircraft'), dict): reg_raw = index_fields.get('aircraft').get('display', reg_raw)
                 
                 if not reg_raw or reg_raw == "None": continue
                     
@@ -249,80 +239,71 @@ def fetch_and_merge_data_v2(end_date):
                 reg_merge = normalize_tail(reg_display)
                 
                 # Filter out Closed/Resolved items BEFORE doing heavy lookups
-                status_val = str(fields.get('status', 'Open')).strip().lower()
-                active_val = fields.get('active', fields.get('is_active', True))
+                status_val = str(index_fields.get('status', 'Open')).strip().lower()
+                active_val = index_fields.get('active', index_fields.get('is_active', True))
                 
                 if status_val in ['closed', 'gesloten', 'resolved', 'done', 'fixed', 'inactive']:
                     continue
                 if str(active_val).lower() in ['false', '0', 'no', 'none']:
                     continue
 
-                # --- ULTIMATE TEXT HUNTER ---
-                desc_raw = None
-                res_title = r.get('title') # Check top-level Nova metadata
-                
-                # 1. Search common English & Dutch field names
-                for k in ['description', 'defect', 'title', 'name', 'remarks', 'finding', 'fault', 'details', 'text', 'symptom', 'beschrijving', 'opmerking', 'klacht', 'probleem', 'issue']:
-                    if fields.get(k) and str(fields.get(k)).strip() not in ["", "None", "null"]:
-                        desc_raw = str(fields.get(k))
-                        break
-                        
-                # 2. Use Nova Resource Title if fields are empty
-                if not desc_raw and res_title and str(res_title).strip() not in ["", "None", "null"]:
-                    desc_raw = str(res_title)
-                    
-                # 3. Fallback: Find the longest descriptive text chunk in the entire item
-                if not desc_raw:
-                    longest_str = ""
-                    for k, v in fields.items():
-                        if isinstance(v, str):
-                            cv = re.sub(r'<[^>]+>', '', v).strip()
-                            if len(cv) > len(longest_str) and cv.lower() not in ['open', 'closed', 'resolved', 'yes', 'no', 'true', 'false']:
-                                if not re.match(r'^\d{4}-\d{2}-\d{2}', cv): # Ignore dates
-                                    longest_str = cv
-                    if len(longest_str) > 3:
-                        desc_raw = longest_str
-                    else:
-                        desc_raw = "Unknown Defect"
+                # Defect Title / ID (e.g. DDL-001)
+                defect_name = str(r.get('title') or index_fields.get('name') or defect_id)
 
-                desc_clean = re.sub(r'<[^>]+>', '', desc_raw).strip() 
-                
-                # --- DUE DATE HUNTER ---
+                # --- Step B: DEEP DIVE INTO THE SPECIFIC DEFECT ---
+                desc_clean = "No description provided."
                 due_clean = None
-                for d_key in ['ultimate_repair_date', 'due_date', 'limit_date', 'limit', 'expiration_date', 'target_date']:
-                    val = fields.get(d_key)
-                    if val and str(val).strip() not in ["", "—", "None", "null"]:
-                        try:
-                            d = pd.to_datetime(str(val)).date()
-                            if d.year > 2000:
-                                due_clean = d
-                                break
-                        except: pass
                 
-                # Sub-Folder Scan: If no date found, dive into the defect-limitations child folder!
-                if not due_clean and defect_id:
-                    limit_url = f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany"
-                    l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", limit_url)
-                    if l_json and 'resources' in l_json:
-                        for lr in l_json.get('resources', []):
-                            l_fields = {f['attribute']: f['value'] for f in lr.get('fields', [])}
-                            for d_key in ['ultimate_repair_date', 'due_date', 'date', 'limit_date', 'limit', 'valid_until']:
-                                val = l_fields.get(d_key)
-                                if val and str(val).strip() not in ["", "—", "None", "null"]:
-                                    try:
-                                        d = pd.to_datetime(str(val)).date()
-                                        if d.year > 2000:
-                                            due_clean = d
-                                            break
-                                    except: pass
-                            if due_clean: break # Stop looping if we found it
+                if defect_id:
+                    detail_url = f"{endpoint}/{defect_id}"
+                    det_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", detail_url)
+                    
+                    if det_json and 'resource' in det_json:
+                        det_fields = {f['attribute']: f['value'] for f in det_json['resource'].get('fields', [])}
+                        
+                        # 1. Hunt for the Hidden Description
+                        for k in ['description', 'defect', 'discrepancy', 'squawk', 'remarks', 'finding', 'fault', 'details', 'text', 'symptom', 'beschrijving', 'klacht', 'probleem']:
+                            if det_fields.get(k) and str(det_fields.get(k)).strip() not in ["", "None", "null"]:
+                                raw_d = str(det_fields.get(k))
+                                desc_clean = re.sub(r'<[^>]+>', '', raw_d).strip() # Clean HTML formatting
+                                break
+                        
+                        # 2. Hunt for Due Date in the detail view
+                        for d_key in ['ultimate_repair_date', 'due_date', 'limit_date', 'limit', 'expiration_date', 'target_date']:
+                            val = det_fields.get(d_key)
+                            if val and str(val).strip() not in ["", "—", "None", "null"]:
+                                try:
+                                    d = pd.to_datetime(str(val)).date()
+                                    if d.year > 2000:
+                                        due_clean = d
+                                        break
+                                except: pass
+
+                    # 3. Sub-Folder Scan for Limitations (If due date is STILL missing)
+                    if not due_clean:
+                        limit_url = f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany"
+                        l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", limit_url)
+                        if l_json and 'resources' in l_json:
+                            for lr in l_json.get('resources', []):
+                                l_fields = {f['attribute']: f['value'] for f in lr.get('fields', [])}
+                                for d_key in ['ultimate_repair_date', 'due_date', 'date', 'limit_date', 'limit', 'valid_until']:
+                                    val = l_fields.get(d_key)
+                                    if val and str(val).strip() not in ["", "—", "None", "null"]:
+                                        try:
+                                            d = pd.to_datetime(str(val)).date()
+                                            if d.year > 2000:
+                                                due_clean = d
+                                                break
+                                        except: pass
+                                if due_clean: break
                 
                 def_type = "DDL" if 'ddl' in endpoint else "HIL"
                 
                 defects_list.append({
                     'MergeKey': reg_merge,
+                    'ID': defect_name,
                     'Type': def_type,
-                    'Status': str(fields.get('status', 'Open')).capitalize(),
+                    'Status': str(index_fields.get('status', 'Open')).capitalize(),
                     'Description': desc_clean,
                     'Due Date': due_clean
                 })
@@ -428,7 +409,6 @@ if df is not None:
     # --- GLOBAL ALERTS ---
     for _, row in df.iterrows():
         if row['Forecast'] < 0: 
-            # Display precise breach date in alert if available
             if pd.notnull(row.get('Breach Date')):
                 breach_str = row['Breach Date'].strftime('%d %b %Y')
                 st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{breach_str}**!", icon="🛑")
@@ -450,7 +430,6 @@ if df is not None:
     with tabs[0]:
         st.subheader("Fleet Summary")
         
-        # Display Table with added Breach Date column
         styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
         styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
         
@@ -486,10 +465,8 @@ if df is not None:
         with tabs[i]:
             st.subheader(f"Helicopter Details: {tail}")
             
-            # Extract data for this specific tail
             ac_df = df[df['Registration'] == tail].iloc[0]
             
-            # 4-Column Metric Layout
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
             c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
@@ -498,20 +475,17 @@ if df is not None:
             
             st.markdown("---")
             
-            # Maintenance Info Block
             col_info, col_bar = st.columns([1, 1])
             with col_info:
                 st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
                 st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
                 
-                # Calendar Due Date logic
                 if pd.notnull(ac_df['Due Date']):
                     days_text = f"(in {int(ac_df['Days Left'])} days)" if ac_df['Days Left'] >= 0 else "(EXPIRED)"
                     st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')} {days_text}")
                 else:
                     st.write("**📅 Calendar Due Date:** No date set")
                     
-                # New Breach Date Display logic
                 if pd.notnull(ac_df.get('Breach Date')):
                     st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')} (Based on bookings)")
                 else:
@@ -535,7 +509,8 @@ if df is not None:
                     def style_defects(row):
                         return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
                         
-                    st.dataframe(ac_defects[['Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
+                    # Added 'ID' to the display columns
+                    st.dataframe(ac_defects[['ID', 'Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
                 else:
                     st.info(f"✅ No open HIL or DDL defects for {tail}.")
             else:
@@ -545,7 +520,6 @@ if df is not None:
             st.markdown("<br>", unsafe_allow_html=True)
             st.subheader("📋 Scheduled Flights & Blockings")
             
-            # Filter flight schedule for this tail using the MergeKey
             if not raw_books_df.empty:
                 detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
                 
@@ -559,7 +533,6 @@ if df is not None:
                     display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Flight Time', 'Total Used', 'Status']
                     
                     def style_rows(row):
-                        # Use the Toran Safety Red (#FF4A2B) with 20% opacity for grounded rows
                         return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
                     
                     st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
@@ -570,6 +543,5 @@ if df is not None:
 
     with st.sidebar:
         st.markdown("---")
-        # Included Breach Date in the downloadable CSV
         csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
