@@ -16,25 +16,21 @@ def get_ebkt_weather():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kn"
         data = requests.get(url, timeout=5).json()['current']
-        
         clouds = data['cloud_cover']
         if clouds < 10: c_desc = "Clear"
         elif clouds < 25: c_desc = "Few"
         elif clouds < 50: c_desc = "Scattered"
         elif clouds < 85: c_desc = "Broken"
         else: c_desc = "Overcast"
-
         return {
             "temp": f"{data['temperature_2m']}°C",
             "wind_spd": f"{data['wind_speed_10m']} KT",
-            "wind_dir": data['wind_direction_10m'],
             "wind_deg": f"{data['wind_direction_10m']}°",
             "clouds": f"{c_desc} ({clouds}%)",
             "vis": f"{round(data['visibility'] / 1000, 1)} KM",
             "qnh": f"{round(data['surface_pressure'])} hPa"
         }
-    except:
-        return {"temp": "--", "wind_spd": "--", "wind_deg": "--", "clouds": "--", "vis": "--", "qnh": "--"}
+    except: return {"temp": "--", "wind_spd": "--", "wind_deg": "--", "clouds": "--", "vis": "--", "qnh": "--"}
 
 weather = get_ebkt_weather()
 
@@ -102,13 +98,11 @@ def fetch_and_merge_data_v2(end_date):
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
-    ac_data, aircraft_registry = [], {}
+    ac_data = []
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
         reg_display = str(fields.get('aircraft') or "Unknown").split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
-        ac_id = next((f.get('belongsToId') for f in r.get('fields', []) if f.get('attribute') == 'aircraft'), None)
-        if ac_id and reg_merge != "UNKNOWN": aircraft_registry[reg_merge] = ac_id
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
         except: curr_val = 0.0
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
@@ -124,6 +118,7 @@ def fetch_and_merge_data_v2(end_date):
             except: pass
         ac_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date})
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
+    
     defects_list = []
     for endpoint in ['ddl-defects', 'hil-defects']:
         d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}?perPage=50")
@@ -140,21 +135,18 @@ def fetch_and_merge_data_v2(end_date):
                 det_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}/{def_id}")
                 if det_json and 'resource' in det_json:
                     det_f = {f['attribute']: f['value'] for f in det_json['resource'].get('fields', [])}
-                    for k in ['description', 'defect', 'remarks', 'finding', 'klacht']:
+                    for k in ['description', 'defect', 'remarks', 'finding']:
                         if det_f.get(k): desc_clean = re.sub(r'<[^>]+>', '', str(det_f.get(k))).strip(); break
                     for dk in ['ultimate_repair_date', 'due_date', 'limit']:
                         if det_f.get(dk):
                             try: due_clean = pd.to_datetime(str(det_f[dk])).date(); break
                             except: pass
             defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': status.capitalize(), 'Description': desc_clean, 'Due Date': due_clean})
+    
     df_defects = pd.DataFrame(defects_list)
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
-    pilot_map = {}
-    try:
-        p_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10).json()
-        for p in p_resp.get('data', []): pilot_map[str(p.get('id'))] = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
-    except: pass
+    
     book_list, now = [], pd.Timestamp.utcnow().tz_localize(None)
     for i in range(2): 
         target = now + pd.Timedelta(weeks=i)
@@ -165,14 +157,13 @@ def fetch_and_merge_data_v2(end_date):
                 if f.get('status') == 'confirmed':
                     start = pd.to_datetime(f['reserved_start_datetime']).tz_convert(None)
                     end = pd.to_datetime(f['reserved_end_datetime']).tz_convert(None)
-                    dur = (end - start).total_seconds() / 3600 * 0.85
                     reg = id_map.get(str(f.get('heli_id', '')))
                     if reg: book_list.append({
-                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': dur,
+                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 
+                        'Planned': (end - start).total_seconds() / 3600 * 0.85,
                         'Type': str(f.get('booking_type', 'Flight')).capitalize(),
                         'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
-                        'Instructor': pilot_map.get(str(f.get('instructor_id')), 'Toran Team'),
-                        'Departure': f.get('departure_airport_name', 'EBKT') # Added Departure extraction
+                        'Departure': f.get('departure_airport_name', 'EBKT')
                     })
         except: pass
     df_books = pd.DataFrame(book_list)
@@ -181,12 +172,10 @@ def fetch_and_merge_data_v2(end_date):
     else: df = df_ac.assign(Planned=0)
     df['Forecast'] = df['Potential'] - df['Planned']
     df['Life Now %'] = ((df['Potential'] / df['Interval']) * 100).clip(0, 100)
-    df['Life Forecast %'] = ((df['Forecast'] / df['Interval']) * 100).clip(0, 100)
     return df, df_books, df_defects
 
-# --- UI Mode Setup ---
-if "mode" in st.query_params and st.query_params["mode"] == "tv":
-    default_idx = 1
+# --- UI Setup ---
+if "mode" in st.query_params and st.query_params["mode"] == "tv": default_idx = 1
 else: default_idx = 0
 
 with st.sidebar:
@@ -196,9 +185,7 @@ with st.sidebar:
     if app_mode == "Guest Welcome Screen": st.query_params["mode"] = "tv"
     else: st.query_params.clear()
     selected_date = st.date_input("🗓️ Forecast End Date", value=datetime.today() + timedelta(days=35))
-    if st.button('🔄 Refresh Data', use_container_width=True): 
-        st.cache_data.clear()
-        st.rerun()
+    if st.button('🔄 Refresh Data', use_container_width=True): st.cache_data.clear(); st.rerun()
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
@@ -207,113 +194,82 @@ if app_mode == "Maintenance Dashboard":
     if df is not None:
         tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
         tabs = st.tabs(tab_names)
-        with tabs[0]:
-            st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Due Date']], hide_index=True, use_container_width=True)
+        with tabs[0]: st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Due Date']], hide_index=True, use_container_width=True)
         for i, tail in enumerate(tab_names[1:], start=1):
             with tabs[i]:
                 ac_df = df[df['Registration'] == tail].iloc[0]
-                c1, c2, c3, c4 = st.columns(4); c1.metric("TSN", f"{ac_df['Current']:.1f}h"); c2.metric("Potential", f"{ac_df['Potential']:.1f}h"); c3.metric("Booked", f"{ac_df['Planned']:.1f}h"); c4.metric("Forecast", f"{ac_df['Forecast']:.1f}h")
                 st.subheader("🛠️ Open Defects")
                 st.dataframe(df_defects[df_defects['MergeKey'] == normalize_tail(tail)][['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True, use_container_width=True)
-                st.subheader("📋 Schedule")
-                st.dataframe(raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)][['Start', 'Type', 'Details', 'Instructor', 'Planned']], hide_index=True, use_container_width=True)
 
 # ==========================================
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 elif app_mode == "Guest Welcome Screen":
     try:
-        with open("Asset 4@4x.jpg", "rb") as f:
-            inline_logo_data = base64.b64encode(f.read()).decode()
-        inline_logo_html = f'<a href="/?mode=admin" target="_self"><img src="data:image/jpeg;base64,{inline_logo_data}" style="height:75px; vertical-align:middle; margin-left:15px; border-radius:8px;"></a>'
-    except: inline_logo_html = '<a href="/?mode=admin" target="_self" style="text-decoration:none; color:#E4D18C; font-size:30px; margin-left:15px;">🚁</a>'
+        with open("Asset 4@4x.jpg", "rb") as f: data = base64.b64encode(f.read()).decode()
+        inline_logo = f'<a href="/?mode=admin" target="_self"><img src="data:image/jpeg;base64,{data}" style="height:75px; vertical-align:middle; margin-left:15px; border-radius:8px;"></a>'
+    except: inline_logo = '🚁'
 
-    st.markdown(f"""
-        <meta http-equiv="refresh" content="600">
+    # Auto-refresh every 60 seconds to update guest & local time
+    st.markdown("""<meta http-equiv="refresh" content="60">
         <style>
-        [data-testid="collapsedControl"], [data-testid="stSidebar"], header {{ display: none !important; }}
-        .stApp {{ margin-top: -90px !important; }}
-        .welcome-title {{ font-size: 85px; font-weight: 900; color: #000000; margin-bottom: 0px; line-height: 1; }}
-        .welcome-subtitle {{ font-size: 36px; font-weight: 600; color: #666666; margin-bottom: 20px; }}
-        .clock-text {{ font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }}
-        .info-card {{ background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 25px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.1); height: 100%; }}
-        .weather-card {{ background-color: #000000; color: #FFFFFF; padding: 20px; border-radius: 12px; text-align: left; height: 100%; }}
-        .weather-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }}
-        .weather-val {{ font-size: 28px; font-weight: 800; color: #E4D18C; }}
-        .weather-lbl {{ font-size: 14px; color: #999999; text-transform: uppercase; font-weight: 700; }}
-        .flight-board {{ width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 24px; }}
-        .flight-board th {{ background-color: #E4D18C; padding: 15px; text-align: left; font-weight: 800; }}
-        .flight-board td {{ padding: 15px; border-bottom: 1px solid #EEE; color: #666; font-weight: 600; }}
-        .active-row td {{ background-color: rgba(228, 209, 140, 0.15) !important; color: #000 !important; font-weight: 800; }}
+        [data-testid="collapsedControl"], [data-testid="stSidebar"], header { display: none !important; }
+        .stApp { margin-top: -90px !important; }
+        .welcome-title { font-size: 80px; font-weight: 900; color: #000000; line-height: 1; margin-bottom:0;}
+        .welcome-subtitle { font-size: 36px; font-weight: 600; color: #666666; margin-bottom: 20px; }
+        .clock-text { font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }
+        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 25px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.1); }
+        .weather-card { background-color: #000000; color: #FFFFFF; padding: 20px; border-radius: 12px; }
+        .weather-val { font-size: 28px; font-weight: 800; color: #E4D18C; }
+        .weather-lbl { font-size: 14px; color: #999999; text-transform: uppercase; }
+        .flight-board { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 24px; }
+        .flight-board th { background-color: #E4D18C; padding: 15px; text-align: left; }
+        .flight-board td { padding: 15px; border-bottom: 1px solid #EEE; color: #666; }
+        .active-row td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000 !important; font-weight: 800; }
         </style>
     """, unsafe_allow_html=True)
 
-    # JavaScript Live Clock Fix
-    st.components.v1.html("""
-        <div style="font-family: 'Segoe UI', sans-serif; font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; width: 100%;">
-            <span id="live-clock">--:--:--</span> Local
-        </div>
-        <script>
-        function updateClock() {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            document.getElementById('live-clock').innerText = timeStr;
-        }
-        updateClock();
-        setInterval(updateClock, 1000);
-        </script>
-    """, height=80)
-
     now_be = pd.Timestamp.now('Europe/Brussels')
+    st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
+
     today_flights, active_flight = pd.DataFrame(), None
     if not raw_books_df.empty:
         raw_books_df['LStart'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
-        raw_books_df['LEnd'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         today_flights = raw_books_df[(raw_books_df['LStart'].dt.date == now_be.date()) & (raw_books_df['Type'] != 'Blocking')].sort_values('LStart')
+        
+        # LOGIC FIX: Find the next flight starting AFTER now. 
+        # If we are currently within a flight's window, keep it. If not, jump to next.
         for _, f in today_flights.iterrows():
-            if (f['LEnd'] - now_be).total_seconds() >= -1800:
+            if f['LStart'] > now_be - pd.Timedelta(minutes=15): # Hand over 15 mins after departure
                 active_flight = f; break
 
     if active_flight is not None:
         guest = str(active_flight['Details']) if str(active_flight['Details']).strip() else "Guest"
-        st.markdown(f'<div class="welcome-title">Welcome, {guest}!{inline_logo_html}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="welcome-title">Welcome, {guest}!{inline_logo}</div>', unsafe_allow_html=True)
         st.markdown('<div class="welcome-subtitle">Prepped and ready for departure</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="welcome-title">Welcome to Toran{inline_logo_html}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="welcome-title">Welcome to Toran{inline_logo}</div>', unsafe_allow_html=True)
         st.markdown('<div class="welcome-subtitle">Kortrijk-Wevelgem Airport (EBKT)</div>', unsafe_allow_html=True)
 
     r_info, r_weather, r_img = st.columns([1.1, 1.2, 1.2])
     with r_info:
         if active_flight is not None:
-            # Added Departure Airport to info card
-            st.markdown(f"""
-                <div class="info-card">
-                    <h3 style="margin:0;">🚁 Flight Details</h3><br>
-                    <p style="font-size:24px; margin:0;"><b>Departs:</b> {active_flight["LStart"].strftime("%H:%M")}</p>
-                    <p style="font-size:24px; margin:0;"><b>Airport:</b> {active_flight.get("Departure", "EBKT")}</p>
-                    <p style="font-size:24px; margin:0;"><b>Tail:</b> {active_flight["Registration"]}</p>
-                </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="info-card"><h3>Toran Center</h3><p>Flight Training<br>Aerial Services</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><h3 style="margin:0;">🚁 Flight Details</h3><br><p style="font-size:24px; margin:0;"><b>Departs:</b> {active_flight["LStart"].strftime("%H:%M")}</p><p style="font-size:24px; margin:0;"><b>Airport:</b> {active_flight.get("Departure", "EBKT")}</p><p style="font-size:24px; margin:0;"><b>Tail:</b> {active_flight["Registration"]}</p></div>', unsafe_allow_html=True)
+        else: st.markdown('<div class="info-card"><h3>Toran Center</h3><p>Flight Training<br>Aerial Services</p></div>', unsafe_allow_html=True)
     
     with r_weather:
-        st.markdown(f"""
-            <div class="weather-card">
-                <div style="font-size:16px; color:#E4D18C; font-weight:800; margin-bottom:5px;">EBKT PILOT WEATHER</div>
-                <div class="weather-grid">
-                    <div><div class="weather-lbl">Temp</div><div class="weather-val">{weather['temp']}</div></div>
-                    <div><div class="weather-lbl">Wind</div><div class="weather-val">{weather['wind_spd']}</div></div>
-                    <div><div class="weather-lbl">Direction</div><div class="weather-val">{weather['wind_deg']}</div></div>
-                    <div><div class="weather-lbl">Clouds</div><div class="weather-val" style="font-size:20px;">{weather['clouds']}</div></div>
-                    <div><div class="weather-lbl">Visibility</div><div class="weather-val">{weather['vis']}</div></div>
-                    <div><div class="weather-lbl">Alt (QNH)</div><div class="weather-val">{weather['qnh']}</div></div>
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div class="weather-card"><div style="font-size:16px; color:#E4D18C; font-weight:800; margin-bottom:5px;">EBKT PILOT WEATHER</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                <div><div class="weather-lbl">Temp</div><div class="weather-val">{weather['temp']}</div></div>
+                <div><div class="weather-lbl">Wind</div><div class="weather-val">{weather['wind_spd']}</div></div>
+                <div><div class="weather-lbl">Direction</div><div class="weather-val">{weather['wind_deg']}</div></div>
+                <div><div class="weather-lbl">Clouds</div><div class="weather-val" style="font-size:20px;">{weather['clouds']}</div></div>
+                <div><div class="weather-lbl">Visibility</div><div class="weather-val">{weather['vis']}</div></div>
+                <div><div class="weather-lbl">Alt (QNH)</div><div class="weather-val">{weather['qnh']}</div></div>
+            </div></div>""", unsafe_allow_html=True)
         
     with r_img:
-        tail_c = normalize_tail(active_flight['Registration']) if active_flight is not None else "raven2"
+        tail_c = normalize_tail(active_flight['Registration']) if active_flight is not None else "OOHXP"
         img = AIRCRAFT_DB.get(tail_c, {}).get('image', 'raven2.jpg')
         try: st.image(img, use_container_width=True)
         except: pass
