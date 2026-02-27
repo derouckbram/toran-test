@@ -11,7 +11,7 @@ import base64
 st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
 
 # --- Weather Setup for Welcome Screen ---
-@st.cache_data(ttl=60) # Reduced weather cache to 1 minute to keep it fresh
+@st.cache_data(ttl=60) 
 def get_ebkt_weather():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kn"
@@ -88,7 +88,7 @@ def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 # --- Core Logic ---
-@st.cache_data(ttl=60) # Dropped cache time to match the 1-minute TV refresh
+@st.cache_data(ttl=60)
 def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
@@ -210,6 +210,34 @@ def fetch_and_merge_data_v2(end_date):
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
+    # --- ADDRESS BOOK FETCH (Customers) ---
+    cust_map = {}
+    try:
+        cust_resp = t_sess.get("https://admin.toran.be/api/customers", timeout=10)
+        if cust_resp.status_code == 200:
+            c_data = cust_resp.json()
+            c_list = c_data.get('data', c_data) if isinstance(c_data, dict) else c_data
+            for c in c_list:
+                c_id = str(c.get('id', ''))
+                c_name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
+                if not c_name: c_name = str(c.get('name', ''))
+                if c_id and c_name: cust_map[c_id] = c_name
+    except: pass
+
+    # --- PILOT DIRECTORY FETCH (Instructors) ---
+    pilot_map = {}
+    try:
+        pilot_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10)
+        if pilot_resp.status_code == 200:
+            p_data = pilot_resp.json()
+            p_list = p_data.get('data', p_data) if isinstance(p_data, dict) else p_data
+            for p in p_list:
+                p_id = str(p.get('id', ''))
+                p_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+                if not p_name: p_name = str(p.get('name', ''))
+                if p_id and p_name: pilot_map[p_id] = p_name
+    except: pass
+
     now = pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
     days_diff = (end_dt - now).days
@@ -233,6 +261,24 @@ def fetch_and_merge_data_v2(end_date):
                         if now < start <= end_dt:
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                             reg = id_map.get(str(f.get('heli_id', '')))
+                            
+                            # Customer Name Logic
+                            guest_name = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
+                            if not guest_name and isinstance(f.get('customer'), dict):
+                                guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
+                            if not guest_name and f.get('customer_id'):
+                                guest_name = cust_map.get(str(f.get('customer_id')), '')
+                            if not guest_name and f.get('title'):
+                                guest_name = str(f.get('title'))
+                                
+                            # Instructor Name Logic (Using the Pilot Directory!)
+                            inst_id = str(f.get('instructor_id') or f.get('pilot_id') or '')
+                            instructor_name = pilot_map.get(inst_id)
+                            if not instructor_name:
+                                instructor_name = str(f.get('instructor_name') or f.get('pilot_name') or 'Toran Team')
+                            if instructor_name.lower() in ['none', 'nan', '']:
+                                instructor_name = 'Toran Team'
+                            
                             if reg: 
                                 book_list.append({
                                     'MergeKey': normalize_tail(reg), 
@@ -241,8 +287,8 @@ def fetch_and_merge_data_v2(end_date):
                                     'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 
                                     'Planned': dur, 
                                     'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
-                                    'Instructor': f.get('instructor_name', 'Toran Team')
+                                    'Details': guest_name,
+                                    'Instructor': instructor_name
                                 })
                 
                 for b in week_data.get('blockings', []):
@@ -280,8 +326,6 @@ def fetch_and_merge_data_v2(end_date):
     return df, df_books, df_defects
 
 # --- UI Sidebar & Mode Tracking ---
-
-# Check the URL parameters to remember our mode after a 60-second TV refresh!
 if "mode" in st.query_params and st.query_params["mode"] == "tv":
     default_index = 1
 else:
@@ -294,11 +338,8 @@ with st.sidebar:
     
     app_mode = st.radio("🖥️ Select Display Mode", ["Maintenance Dashboard", "Guest Welcome Screen"], index=default_index)
     
-    # Save the selected mode to the URL so it survives refreshes
-    if app_mode == "Guest Welcome Screen":
-        st.query_params["mode"] = "tv"
-    else:
-        st.query_params.clear()
+    if app_mode == "Guest Welcome Screen": st.query_params["mode"] = "tv"
+    else: st.query_params.clear()
 
     st.markdown("---")
     
@@ -409,7 +450,7 @@ if app_mode == "Maintenance Dashboard":
                         detail_df['Flight Time'] = detail_df['Planned'].apply(lambda x: f"{x:.1f}h")
                         detail_df['Total Used'] = detail_df['Cumulative'].apply(lambda x: f"{x:.1f}h")
                         detail_df['Status'] = detail_df['Is_Breach'].apply(lambda x: "🚨 BREACH" if x else "✅ OK")
-                        display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Flight Time', 'Total Used', 'Status']
+                        display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Instructor', 'Flight Time', 'Total Used', 'Status']
                         def style_rows(row): return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
                         st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
                     else: st.info(f"No flights or blockings scheduled for {tail} before {selected_date.strftime('%d %b %Y')}.")
@@ -424,7 +465,6 @@ if app_mode == "Maintenance Dashboard":
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 elif app_mode == "Guest Welcome Screen":
-    # 60 Second Auto-Refresh to keep clock accurate!
     st.markdown("""
         <meta http-equiv="refresh" content="60">
         <style>
@@ -457,7 +497,6 @@ elif app_mode == "Guest Welcome Screen":
         try:
             with open("toran_logo.png", "rb") as image_file:
                 encoded_logo = base64.b64encode(image_file.read()).decode()
-            # Clicking the logo routes back to Admin mode!
             logo_html = f'<a href="/?mode=admin" target="_self"><img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Dashboard"></a>'
             st.markdown(logo_html, unsafe_allow_html=True)
         except FileNotFoundError:
