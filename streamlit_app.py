@@ -210,6 +210,20 @@ def fetch_and_merge_data_v2(end_date):
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
+    # --- NEW: ADDRESS BOOK FETCH (Cross-reference Customer IDs to Names) ---
+    cust_map = {}
+    try:
+        cust_resp = t_sess.get("https://admin.toran.be/api/customers", timeout=10)
+        if cust_resp.status_code == 200:
+            c_data = cust_resp.json()
+            c_list = c_data.get('data', c_data) if isinstance(c_data, dict) else c_data
+            for c in c_list:
+                c_id = str(c.get('id', ''))
+                c_name = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
+                if not c_name: c_name = str(c.get('name', ''))
+                if c_id and c_name: cust_map[c_id] = c_name
+    except: pass
+
     now = pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
     days_diff = (end_dt - now).days
@@ -233,12 +247,22 @@ def fetch_and_merge_data_v2(end_date):
                         if now < start <= end_dt:
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                             reg = id_map.get(str(f.get('heli_id', '')))
+                            
+                            # Aggressive Name Hunter (Using the Address Book!)
+                            guest_name = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
+                            if not guest_name and isinstance(f.get('customer'), dict):
+                                guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
+                            if not guest_name and f.get('customer_id'):
+                                guest_name = cust_map.get(str(f.get('customer_id')), '')
+                            if not guest_name and f.get('title'):
+                                guest_name = str(f.get('title'))
+                            
                             if reg: 
                                 book_list.append({
                                     'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 
                                     'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 
                                     'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
+                                    'Details': guest_name,
                                     'Instructor': f.get('instructor_name', 'Toran Team')
                                 })
                 
@@ -408,7 +432,6 @@ if app_mode == "Maintenance Dashboard":
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 elif app_mode == "Guest Welcome Screen":
-    # 1. Inject TV styling, hide sidebar, and set auto-refresh
     st.markdown("""
         <meta http-equiv="refresh" content="300">
         <style>
@@ -436,7 +459,6 @@ elif app_mode == "Guest Welcome Screen":
 
     now_be = pd.Timestamp.now('Europe/Brussels')
 
-    # Header
     head_col1, head_col2 = st.columns([1, 1])
     with head_col1:
         try:
@@ -451,28 +473,22 @@ elif app_mode == "Guest Welcome Screen":
 
     st.markdown("<br><br>", unsafe_allow_html=True)
 
-    # Process Flights for Welcome Screen
     today_flights = pd.DataFrame()
     active_flight = None
 
     if not raw_books_df.empty:
-        # Localize both Start and End times
         raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         raw_books_df['Local_End'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         
-        # Filter for ALL Flights Today
         today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] == 'Flight')].copy()
         
         if not today_flights.empty:
             today_flights = today_flights.sort_values('Local_Start')
             for _, f in today_flights.iterrows():
-                # Find the NEXT chronological flight that has not completely finished yet
-                # (We keep their name on screen until 30 minutes after their flight officially ends)
                 if (f['Local_End'] - now_be).total_seconds() >= -1800:
                     active_flight = f
                     break
 
-    # Determine Customer Name Safely
     guest_name = ""
     if active_flight is not None:
         guest_name = str(active_flight['Details']).strip()
@@ -518,7 +534,6 @@ elif app_mode == "Guest Welcome Screen":
         for _, f in today_flights.iterrows():
             row_class = 'class="active-flight"' if (active_flight is not None and active_flight.equals(f)) else ''
             
-            # Format the board guest name safely
             board_guest = str(f["Details"]).strip()
             if not board_guest or board_guest.lower() in ['nan', 'none']: board_guest = "Guest"
                 
