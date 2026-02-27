@@ -5,115 +5,61 @@ from bs4 import BeautifulSoup
 import urllib.parse
 import re  
 from datetime import datetime, timedelta
+import base64
 
 # --- Page Config ---
-st.set_page_config(page_title="Toran Maintenance Forecast", layout="wide", page_icon="🚁")
+st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
+
+# --- Weather Setup for Welcome Screen ---
+@st.cache_data(ttl=600)
+def get_ebkt_weather():
+    try:
+        url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kn"
+        data = requests.get(url, timeout=5).json()['current']
+        return {
+            "temp": f"{data['temperature_2m']}°C",
+            "wind": f"{data['wind_speed_10m']} kts",
+            "dir": f"{data['wind_direction_10m']}°"
+        }
+    except:
+        return {"temp": "--°C", "wind": "-- kts", "dir": "--°"}
+
+weather = get_ebkt_weather()
+
+# --- Aircraft Image Database ---
+AIRCRAFT_DB = {
+    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
+}
 
 # --- Toran Official Brand Style Engine ---
 def apply_toran_style():
     st.markdown(
         """
         <style>
-        /* 1. Global Background and Typography */
-        .stApp {
-            background-color: #FFFFFF; /* White */
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            color: #000000;
-        }
-        
-        /* 2. Style the Tabs to look like modern web buttons */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            background-color: transparent;
-        }
-        .stTabs [data-baseweb="tab"] {
-            background-color: #FFFFFF;
-            border-radius: 4px !important;
-            padding: 10px 20px !important;
-            border: 1px solid #999999; /* Light Gray */
-            color: #666666; /* Dark Gray */
-            font-weight: 600;
-            transition: all 0.2s ease;
-        }
-        .stTabs [data-baseweb="tab"]:hover {
-            border-color: #D8BF95; /* Social Media Beige */
-            color: #000000;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: #E4D18C !important; /* Toran Beige */
-            color: #000000 !important; /* Black */
-            border: 1px solid #E4D18C !important;
-        }
-        
-        /* 3. Make KPI Metrics look like elevated dashboard cards */
-        [data-testid="metric-container"] {
-            background-color: #FFFFFF;
-            border: 1px solid #999999; /* Light Gray */
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border-left: 5px solid #E4D18C; /* Beige accent line */
-        }
-        [data-testid="stMetricValue"] {
-            font-size: 34px !important;
-            font-weight: 800 !important;
-            color: #000000 !important; /* Black */
-        }
-        [data-testid="stMetricLabel"] {
-            font-size: 15px !important;
-            font-weight: 600 !important;
-            color: #666666 !important; /* Dark Gray */
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        /* 4. Style DataFrames and Charts */
-        [data-testid="stDataFrame"] {
-            background-color: #FFFFFF;
-            border-radius: 8px;
-            padding: 15px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border: 1px solid #999999; /* Light Gray */
-        }
-        
-        /* 5. Headers and Titles */
-        h1 {
-            color: #000000 !important; /* Black */
-            font-weight: 800 !important;
-            letter-spacing: -0.5px;
-        }
-        h2, h3 {
-            color: #000000 !important; /* Black */
-            font-weight: 700 !important;
-            margin-bottom: 15px !important;
-        }
-
-        /* 6. Sidebar styling */
-        [data-testid="stSidebar"] {
-            background-color: #F8F8F8;
-            border-right: 1px solid #999999; /* Light Gray */
-        }
-        
-        /* 7. Modernize the Progress Bars to use Toran Beige */
-        .stProgress > div > div > div > div {
-            background-color: #E4D18C !important; /* Toran Beige */
-            border-radius: 4px;
-        }
+        .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
+        .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
+        .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
+        .stTabs [data-baseweb="tab"]:hover { border-color: #D8BF95; color: #000000; }
+        .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
+        [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border-left: 5px solid #E4D18C; }
+        [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
+        [data-testid="stMetricLabel"] { font-size: 15px !important; font-weight: 600 !important; color: #666666 !important; text-transform: uppercase; }
+        [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #999999; }
+        h1, h2, h3 { color: #000000 !important; font-weight: 800 !important; }
+        [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
+        .stProgress > div > div > div > div { background-color: #E4D18C !important; border-radius: 4px; }
         </style>
-        """,
-        unsafe_allow_html=True
+        """, unsafe_allow_html=True
     )
 
-# Inject the style immediately
 apply_toran_style()
 
 # --- Helper Functions ---
 def get_authenticated_session(base_url, login_path, email, password):
     session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json'
-    })
+    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
     login_url = f"{base_url.rstrip('/')}{login_path}"
     try:
         r = session.get(login_url, timeout=15)
@@ -123,26 +69,15 @@ def get_authenticated_session(base_url, login_path, email, password):
         payload = {"_token": csrf, "email": email, "password": password, "remember": "on"}
         session.post(login_url, data=payload, headers={'Referer': login_url}, timeout=15)
         return session
-    except Exception: 
-        return None
+    except: return None
 
 def fetch_resource(session, base_url, resource_name):
-    prefixes = ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]
-    for prefix in prefixes:
-        url = f"{base_url.rstrip('/')}{prefix}{resource_name}"
+    for prefix in ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]:
         try:
-            resp = session.get(url, timeout=10)
+            resp = session.get(f"{base_url.rstrip('/')}{prefix}{resource_name}", timeout=10)
             if resp.status_code == 200: return resp.json()
-        except: 
-            continue
+        except: continue
     return None
-
-def safe_parse_date(date_str):
-    if not date_str: return None
-    dt = pd.to_datetime(date_str)
-    if dt.tz is not None:
-        dt = dt.tz_convert(None)
-    return dt
 
 def normalize_tail(tail):
     if not tail: return "UNKNOWN"
@@ -158,117 +93,85 @@ def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, "Authentication Failed.", {}, pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Parse Upcoming Maintenances
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     ac_data = []
+    aircraft_registry = {}
     
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-        
         reg_raw = str(fields.get('aircraft') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
 
-        # Hours
+        ac_id = None
+        for f in r.get('fields', []):
+            if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
+        if ac_id and reg_merge != "UNKNOWN": aircraft_registry[reg_merge] = ac_id
+
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
         except: curr_val = 0.0
-        
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
-        
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
 
-        # Dynamic Interval Extraction
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
-        try:
-            match = re.search(r'(\d+)', maint_type_str)
-            interval = float(match.group(1)) if match else 100.0
-        except:
-            interval = 100.0
-
+        try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
+        except: interval = 100.0
         if interval <= 0: interval = 100.0 
 
-        # Dates
         due_date = None
         raw_date = fields.get('max_valid_until')
         if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
             try: 
                 parsed_date = pd.to_datetime(str(raw_date)).date()
-                if parsed_date.year > 2000:
-                    due_date = parsed_date
+                if parsed_date.year > 2000: due_date = parsed_date
             except: pass
 
         ac_data.append({
             'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
             'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
         })
-    
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # --- 2. DEEP DIVE DEFECT VACUUM CLEANER ---
+    # --- DEFECT VACUUM ---
     defects_list = []
     for endpoint in ['ddl-defects', 'hil-defects']:
         page = 1
         while True:
-            # Step A: Get the list of defects
-            d_url = f"{endpoint}?perPage=100&page={page}"
-            d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", d_url)
-            
-            if not d_json or 'resources' not in d_json or not d_json['resources']:
-                break
+            d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}?perPage=100&page={page}")
+            if not d_json or 'resources' not in d_json or not d_json['resources']: break
                 
             for r in d_json.get('resources', []):
                 index_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                defect_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
                 
-                # Extract internal defect ID
-                defect_id = r.get('id')
-                if isinstance(defect_id, dict):
-                    defect_id = defect_id.get('value')
-                
-                # Identify the Aircraft
                 reg_raw = str(index_fields.get('aircraft') or index_fields.get('helicopter') or index_fields.get('registration') or "")
                 if isinstance(index_fields.get('aircraft'), dict): reg_raw = index_fields.get('aircraft').get('display', reg_raw)
-                
                 if not reg_raw or reg_raw == "None": continue
                     
                 reg_display = reg_raw.split(' ')[0].strip().upper()
                 reg_merge = normalize_tail(reg_display)
                 
-                # Filter out Closed/Resolved items BEFORE doing heavy lookups
                 status_val = str(index_fields.get('status', 'Open')).strip().lower()
                 active_val = index_fields.get('active', index_fields.get('is_active', True))
-                
-                if status_val in ['closed', 'gesloten', 'resolved', 'done', 'fixed', 'inactive']:
-                    continue
-                if str(active_val).lower() in ['false', '0', 'no', 'none']:
-                    continue
+                if status_val in ['closed', 'gesloten', 'resolved', 'done', 'fixed', 'inactive'] or str(active_val).lower() in ['false', '0', 'no', 'none']: continue
 
-                # Defect Title / ID (e.g. DDL-001)
                 defect_name = str(r.get('title') or index_fields.get('name') or defect_id)
-
-                # --- Step B: DEEP DIVE INTO THE SPECIFIC DEFECT ---
                 desc_clean = "No description provided."
                 due_clean = None
                 
                 if defect_id:
-                    detail_url = f"{endpoint}/{defect_id}"
-                    det_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", detail_url)
-                    
+                    det_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}/{defect_id}")
                     if det_json and 'resource' in det_json:
                         det_fields = {f['attribute']: f['value'] for f in det_json['resource'].get('fields', [])}
-                        
-                        # 1. Hunt for the Hidden Description
                         for k in ['description', 'defect', 'discrepancy', 'squawk', 'remarks', 'finding', 'fault', 'details', 'text', 'symptom', 'beschrijving', 'klacht', 'probleem']:
                             if det_fields.get(k) and str(det_fields.get(k)).strip() not in ["", "None", "null"]:
-                                raw_d = str(det_fields.get(k))
-                                desc_clean = re.sub(r'<[^>]+>', '', raw_d).strip() # Clean HTML formatting
+                                desc_clean = re.sub(r'<[^>]+>', '', str(det_fields.get(k))).strip() 
                                 break
-                        
-                        # 2. Hunt for Due Date in the detail view
                         for d_key in ['ultimate_repair_date', 'due_date', 'limit_date', 'limit', 'expiration_date', 'target_date']:
                             val = det_fields.get(d_key)
                             if val and str(val).strip() not in ["", "—", "None", "null"]:
@@ -279,10 +182,8 @@ def fetch_and_merge_data_v2(end_date):
                                         break
                                 except: pass
 
-                    # 3. Sub-Folder Scan for Limitations (If due date is STILL missing)
                     if not due_clean:
-                        limit_url = f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany"
-                        l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", limit_url)
+                        l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany")
                         if l_json and 'resources' in l_json:
                             for lr in l_json.get('resources', []):
                                 l_fields = {f['attribute']: f['value'] for f in lr.get('fields', [])}
@@ -297,27 +198,17 @@ def fetch_and_merge_data_v2(end_date):
                                         except: pass
                                 if due_clean: break
                 
-                def_type = "DDL" if 'ddl' in endpoint else "HIL"
-                
                 defects_list.append({
-                    'MergeKey': reg_merge,
-                    'ID': defect_name,
-                    'Type': def_type,
-                    'Status': str(index_fields.get('status', 'Open')).capitalize(),
-                    'Description': desc_clean,
-                    'Due Date': due_clean
+                    'MergeKey': reg_merge, 'ID': defect_name, 'Type': "DDL" if 'ddl' in endpoint else "HIL",
+                    'Status': str(index_fields.get('status', 'Open')).capitalize(), 'Description': desc_clean, 'Due Date': due_clean
                 })
-                
-            if not d_json.get('next_page_url'):
-                break
+            if not d_json.get('next_page_url'): break
             page += 1
-            
     df_defects = pd.DataFrame(defects_list)
 
-    # 3. Fetch Toran Bookings
+    # 3. Fetch Toran Bookings (Now includes Instructor parsing for Welcome Screen)
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
-    if xsrf_cookie:
-        t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
+    if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
     now = pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
@@ -342,7 +233,14 @@ def fetch_and_merge_data_v2(end_date):
                         if now < start <= end_dt:
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                             reg = id_map.get(str(f.get('heli_id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()})
+                            if reg: 
+                                book_list.append({
+                                    'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 
+                                    'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 
+                                    'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
+                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
+                                    'Instructor': f.get('instructor_name', 'Toran Team')
+                                })
                 
                 for b in week_data.get('blockings', []):
                     start = pd.to_datetime(b.get('start_datetime')).tz_convert(None)
@@ -350,7 +248,7 @@ def fetch_and_merge_data_v2(end_date):
                         dur = (pd.to_datetime(b.get('end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                         for h in b.get('helis'):
                             reg = id_map.get(str(h.get('id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description','')})
+                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description',''), 'Instructor': '-'})
         except: pass
 
     df_books = pd.DataFrame(book_list)
@@ -360,7 +258,6 @@ def fetch_and_merge_data_v2(end_date):
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         
-        # Find the exact date the breach happens
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index()
         breach_dates.rename(columns={'Start': 'Breach Date'}, inplace=True)
         
@@ -372,25 +269,21 @@ def fetch_and_merge_data_v2(end_date):
         df['Breach Date'] = pd.NaT
 
     df['Forecast'] = df['Potential'] - df['Planned']
-    
-    # Calculate "Life Remaining Now" relative to the inspection interval
     df['Life Now %'] = (df['Potential'] / df['Interval']) * 100
     df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
-
-    # Calculate "Life Remaining at Forecast Date" relative to the inspection interval
     df['Life Forecast %'] = (df['Forecast'] / df['Interval']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].clip(lower=0, upper=100)
     
     return df, df_books, df_defects
 
-# --- UI ---
+# --- UI Sidebar ---
 with st.sidebar:
-    try:
-        st.image("toran_logo.png", use_container_width=True)
-    except FileNotFoundError:
-        pass 
-    
+    try: st.image("toran_logo.png", use_container_width=True)
+    except FileNotFoundError: pass 
     st.markdown("<br>", unsafe_allow_html=True)
+    
+    app_mode = st.radio("🖥️ Select Display Mode", ["Maintenance Dashboard", "Guest Welcome Screen"])
+    st.markdown("---")
     
     default_date = datetime.today() + timedelta(days=35)
     selected_date = st.date_input("🗓️ Forecast End Date", value=default_date)
@@ -398,150 +291,241 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-st.title("Operations & Maintenance Forecast")
-
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
-if df is not None:
-    today = pd.Timestamp.now().normalize()
-    df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
 
-    # --- GLOBAL ALERTS ---
-    for _, row in df.iterrows():
-        if row['Forecast'] < 0: 
-            if pd.notnull(row.get('Breach Date')):
-                breach_str = row['Breach Date'].strftime('%d %b %Y')
-                st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{breach_str}**!", icon="🛑")
-            else:
-                st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
-                
-        if pd.notnull(row['Days Left']):
-            days = row['Days Left']
-            if 0 <= days <= 14: 
-                st.warning(f"📅 **CALENDAR:** {row['Registration']} due in {int(days)} days!", icon="⚠️")
+# ==========================================
+# MODE 1: MAINTENANCE DASHBOARD
+# ==========================================
+if app_mode == "Maintenance Dashboard":
+    st.title("Operations & Maintenance Forecast")
 
-    st.markdown("---")
+    if df is not None:
+        today = pd.Timestamp.now().normalize()
+        df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
 
-    # --- DYNAMIC TABS GENERATION ---
-    tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
-    tabs = st.tabs(tab_names)
-
-    # --- TAB 0: FLEET OVERVIEW ---
-    with tabs[0]:
-        st.subheader("Fleet Summary")
-        
-        styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
-        styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
-        
-        st.dataframe(styled_df, 
-                     column_config={
-                         "Life Now": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
-                         "Life Forecast": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
-                         "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
-                         "Est. Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
-                     }, 
-                     hide_index=True, use_container_width=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        col_chart1, col_chart2 = st.columns(2)
-        with col_chart1:
-            st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
-            chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
-            chart_df.columns = ['Remaining Potential', 'Booked Hours']
-            st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
-            
-        with col_chart2:
-            st.subheader("Calendar Days Remaining")
-            cal_df = df.dropna(subset=['Days Left']).copy()
-            if not cal_df.empty:
-                cal_chart = cal_df.sort_values('Days Left')[['Registration', 'Days Left']].set_index('Registration')
-                cal_chart.columns = ['Days Until Maintenance']
-                st.bar_chart(cal_chart, color="#E4D18C")
-            else:
-                st.info("No calendar due dates available.")
-
-    # --- TABS 1 to N: AIRCRAFT SPECIFIC DETAILS ---
-    for i, tail in enumerate(tab_names[1:], start=1):
-        with tabs[i]:
-            st.subheader(f"Helicopter Details: {tail}")
-            
-            ac_df = df[df['Registration'] == tail].iloc[0]
-            
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
-            c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
-            c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
-            c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
-            
-            st.markdown("---")
-            
-            col_info, col_bar = st.columns([1, 1])
-            with col_info:
-                st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
-                st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
-                
-                if pd.notnull(ac_df['Due Date']):
-                    days_text = f"(in {int(ac_df['Days Left'])} days)" if ac_df['Days Left'] >= 0 else "(EXPIRED)"
-                    st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')} {days_text}")
+        for _, row in df.iterrows():
+            if row['Forecast'] < 0: 
+                if pd.notnull(row.get('Breach Date')):
+                    st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{row['Breach Date'].strftime('%d %b %Y')}**!", icon="🛑")
                 else:
-                    st.write("**📅 Calendar Due Date:** No date set")
-                    
-                if pd.notnull(ac_df.get('Breach Date')):
-                    st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')} (Based on bookings)")
-                else:
-                    st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
-                    
-            with col_bar:
-                st.write("**Life Remaining NOW:**")
-                st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
-                
-                st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
-                st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
+                    st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
+            if pd.notnull(row['Days Left']):
+                if 0 <= row['Days Left'] <= 14: st.warning(f"📅 **CALENDAR:** {row['Registration']} due in {int(row['Days Left'])} days!", icon="⚠️")
 
-            # --- OPEN DEFECTS SECTION ---
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.subheader("🛠️ Open Defects (HIL / DDL)")
-            if df_defects is not None and not df_defects.empty:
-                ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
-                if not ac_defects.empty:
-                    ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
-                    
-                    def style_defects(row):
-                        return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
-                        
-                    # Added 'ID' to the display columns
-                    st.dataframe(ac_defects[['ID', 'Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
-                else:
-                    st.info(f"✅ No open HIL or DDL defects for {tail}.")
-            else:
-                st.info(f"✅ No open HIL or DDL defects for {tail}.")
-
-            # --- FLIGHT SCHEDULE SECTION ---
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.subheader("📋 Scheduled Flights & Blockings")
-            
-            if not raw_books_df.empty:
-                detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
-                
-                if not detail_df.empty:
-                    detail_df['Date'] = detail_df['Start'].dt.strftime('%d %b %Y')
-                    detail_df['Time (UTC)'] = detail_df['Start'].dt.strftime('%H:%M') + " - " + detail_df['End'].dt.strftime('%H:%M')
-                    detail_df['Flight Time'] = detail_df['Planned'].apply(lambda x: f"{x:.1f}h")
-                    detail_df['Total Used'] = detail_df['Cumulative'].apply(lambda x: f"{x:.1f}h")
-                    detail_df['Status'] = detail_df['Is_Breach'].apply(lambda x: "🚨 BREACH" if x else "✅ OK")
-                    
-                    display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Flight Time', 'Total Used', 'Status']
-                    
-                    def style_rows(row):
-                        return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
-                    
-                    st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
-                else:
-                    st.info(f"No flights or blockings scheduled for {tail} before {selected_date.strftime('%d %b %Y')}.")
-            else:
-                st.info("No schedule data available.")
-
-    with st.sidebar:
         st.markdown("---")
-        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
-        st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
+
+        tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
+        tabs = st.tabs(tab_names)
+
+        with tabs[0]:
+            st.subheader("Fleet Summary")
+            styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
+            styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
+            
+            st.dataframe(styled_df, 
+                         column_config={
+                             "Life Now": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
+                             "Life Forecast": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
+                             "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
+                             "Est. Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
+                         }, hide_index=True, use_container_width=True)
+
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1:
+                st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
+                chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
+                chart_df.columns = ['Remaining Potential', 'Booked Hours']
+                st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
+            with col_chart2:
+                st.subheader("Calendar Days Remaining")
+                cal_df = df.dropna(subset=['Days Left']).copy()
+                if not cal_df.empty:
+                    cal_chart = cal_df.sort_values('Days Left')[['Registration', 'Days Left']].set_index('Registration')
+                    cal_chart.columns = ['Days Until Maintenance']
+                    st.bar_chart(cal_chart, color="#E4D18C")
+
+        for i, tail in enumerate(tab_names[1:], start=1):
+            with tabs[i]:
+                st.subheader(f"Helicopter Details: {tail}")
+                ac_df = df[df['Registration'] == tail].iloc[0]
+                
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
+                c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
+                c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
+                c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
+                st.markdown("---")
+                
+                col_info, col_bar = st.columns([1, 1])
+                with col_info:
+                    st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
+                    st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                    if pd.notnull(ac_df['Due Date']): st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')}")
+                    else: st.write("**📅 Calendar Due Date:** No date set")
+                    if pd.notnull(ac_df.get('Breach Date')): st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')}")
+                    else: st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
+                        
+                with col_bar:
+                    st.write("**Life Remaining NOW:**")
+                    st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
+                    st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
+                    st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.subheader("🛠️ Open Defects (HIL / DDL)")
+                if df_defects is not None and not df_defects.empty:
+                    ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
+                    if not ac_defects.empty:
+                        ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
+                        def style_defects(row): return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
+                        st.dataframe(ac_defects[['ID', 'Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
+                    else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
+                else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.subheader("📋 Scheduled Flights & Blockings")
+                if not raw_books_df.empty:
+                    detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
+                    if not detail_df.empty:
+                        detail_df['Date'] = detail_df['Start'].dt.strftime('%d %b %Y')
+                        detail_df['Time (UTC)'] = detail_df['Start'].dt.strftime('%H:%M') + " - " + detail_df['End'].dt.strftime('%H:%M')
+                        detail_df['Flight Time'] = detail_df['Planned'].apply(lambda x: f"{x:.1f}h")
+                        detail_df['Total Used'] = detail_df['Cumulative'].apply(lambda x: f"{x:.1f}h")
+                        detail_df['Status'] = detail_df['Is_Breach'].apply(lambda x: "🚨 BREACH" if x else "✅ OK")
+                        display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Flight Time', 'Total Used', 'Status']
+                        def style_rows(row): return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
+                        st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
+                    else: st.info(f"No flights or blockings scheduled for {tail} before {selected_date.strftime('%d %b %Y')}.")
+
+        with st.sidebar:
+            st.markdown("---")
+            csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+            st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
+
+
+# ==========================================
+# MODE 2: GUEST WELCOME SCREEN
+# ==========================================
+elif app_mode == "Guest Welcome Screen":
+    # 1. Inject TV styling, hide sidebar, and set auto-refresh
+    st.markdown("""
+        <meta http-equiv="refresh" content="300">
+        <style>
+        [data-testid="collapsedControl"] { display: none; }
+        [data-testid="stSidebar"] { display: none; }
+        header { display: none !important; }
+        .welcome-title { font-size: 70px; font-weight: 900; color: #000000; line-height: 1.1; margin-bottom: 10px; }
+        .welcome-subtitle { font-size: 35px; font-weight: 600; color: #666666; margin-bottom: 40px; }
+        .clock-text { font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }
+        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); margin-bottom: 30px; }
+        .info-card h3 { font-size: 35px; margin: 0 0 10px 0; color: #000000; }
+        .info-card p { font-size: 25px; margin: 0; color: #666666; }
+        .weather-card { background-color: #000000; color: #FFFFFF; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2); }
+        .weather-temp { font-size: 60px; font-weight: 800; color: #E4D18C; }
+        .weather-desc { font-size: 25px; color: #999999; }
+        .flight-board { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 22px; }
+        .flight-board th { background-color: #E4D18C; color: #000000; padding: 15px; text-align: left; font-weight: 800; }
+        .flight-board td { padding: 15px; border-bottom: 1px solid #E2E8F0; color: #666666; font-weight: 600; }
+        .flight-board tr:nth-child(even) { background-color: #F8F8F8; }
+        .active-flight td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000000; font-weight: 800; }
+        .clickable-logo { transition: opacity 0.2s ease; }
+        .clickable-logo:hover { opacity: 0.8; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    now_be = pd.Timestamp.now('Europe/Brussels')
+
+    # Header
+    head_col1, head_col2 = st.columns([1, 1])
+    with head_col1:
+        try:
+            with open("toran_logo.png", "rb") as image_file:
+                encoded_logo = base64.b64encode(image_file.read()).decode()
+            logo_html = f'<a href="/" target="_self"><img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Dashboard"></a>'
+            st.markdown(logo_html, unsafe_allow_html=True)
+        except FileNotFoundError:
+            st.markdown('<a href="/" target="_self" style="text-decoration:none;"><h1 style="color:#000000;" class="clickable-logo">TORAN HELICOPTERS</h1></a>', unsafe_allow_html=True)
+    with head_col2:
+        st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    # Process Flights for Welcome Screen
+    today_flights = pd.DataFrame()
+    active_flight = None
+
+    if not raw_books_df.empty:
+        raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
+        today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] == 'Flight')].copy()
+        
+        if not today_flights.empty:
+            today_flights = today_flights.sort_values('Local_Start')
+            for _, f in today_flights.iterrows():
+                if -30 <= (f['Local_Start'] - now_be).total_seconds() / 60 <= 90:
+                    active_flight = f
+                    break
+
+    if active_flight is not None and str(active_flight['Details']).strip():
+        st.markdown(f'<div class="welcome-title">Welcome, {active_flight["Details"]}!</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns([1.5, 1])
+        with col1:
+            st.markdown(f"""
+                <div class="info-card">
+                    <h3>🚁 Your Flight Details</h3>
+                    <p><b>Time:</b> {active_flight['Local_Start'].strftime('%H:%M')} Local</p>
+                    <p><b>Aircraft:</b> {active_flight['Registration']}</p>
+                    <p><b>Instructor:</b> {active_flight['Instructor']}</p>
+                </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            tail_clean = normalize_tail(active_flight['Registration'])
+            ac_info = AIRCRAFT_DB.get(tail_clean, None)
+            if ac_info:
+                try: st.image(ac_info['image'], use_container_width=True, caption=active_flight['Registration'])
+                except FileNotFoundError: pass
+            else: st.markdown("<br>", unsafe_allow_html=True)
+                
+            st.markdown(f"""
+                <div class="weather-card" style="margin-top: 20px;">
+                    <div style="font-size: 20px; font-weight: bold; color: #E4D18C;">EBKT WEATHER</div>
+                    <div class="weather-temp">{weather['temp']}</div>
+                    <div class="weather-desc">Wind: {weather['wind']} at {weather['dir']}</div>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="welcome-title">Welcome to Toran Helicopters</div>', unsafe_allow_html=True)
+        st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk</div>', unsafe_allow_html=True)
+
+    if not today_flights.empty:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div style="font-size: 30px; font-weight: 800; color: #000000; border-bottom: 4px solid #E4D18C; display: inline-block; margin-bottom: 10px;">TODAY\'S DEPARTURES</div>', unsafe_allow_html=True)
+        
+        board_html = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th><th>Instructor</th></tr>'
+        for _, f in today_flights.iterrows():
+            row_class = 'class="active-flight"' if (active_flight is not None and active_flight.equals(f)) else ''
+            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{f["Details"]}</td><td>{f["Instructor"]}</td></tr>'
+        board_html += '</table>'
+        st.markdown(board_html, unsafe_allow_html=True)
+    else:
+        st.markdown("<br>", unsafe_allow_html=True)
+        empty_col1, empty_col2 = st.columns([1.5, 1])
+        with empty_col1:
+            try: st.image("raven2.jpg", use_container_width=True)
+            except FileNotFoundError: st.info("Upload 'raven2.jpg' to GitHub to display an image here!")
+        with empty_col2:
+            st.markdown(f"""
+                <div class="weather-card">
+                    <div style="font-size: 20px; font-weight: bold; color: #E4D18C;">EBKT WEATHER</div>
+                    <div class="weather-temp">{weather['temp']}</div>
+                    <div class="weather-desc">Wind: {weather['wind']} at {weather['dir']}</div>
+                </div>
+            """, unsafe_allow_html=True)
+            st.markdown(f"""
+                <div class="info-card" style="text-align: center; margin-top:20px;">
+                    <h3>Our Fleet</h3>
+                    <p>Robinson R44 Raven I</p>
+                    <p>Robinson R44 Raven II</p>
+                    <p>Guimbal Cabri G2</p>
+                </div>
+            """, unsafe_allow_html=True)
