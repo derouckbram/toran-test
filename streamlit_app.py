@@ -76,8 +76,8 @@ def fetch_and_merge_data_v2(end_date):
     docs_data = []
     aircraft_registry = {} 
 
-    # 1A. Parse Standard CAMO Maintenances & Grab Internal Aircraft IDs
-    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
+    # 1A. Parse Standard CAMO Maintenances (Pulling 100 items to avoid pagination cutoff)
+    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if maint_json:
         for r in maint_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
@@ -128,12 +128,18 @@ def fetch_and_merge_data_v2(end_date):
                     'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
                 })
 
-    # 1B. Precision Document Fetcher (Respecting the "Is Active" field)
+    # 1B. Precision Document Fetcher with PAGINATION & "Is Active"
     for reg_merge, ac_info in aircraft_registry.items():
-        doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany"
-        docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
+        page = 1
         
-        if docs_json and 'resources' in docs_json:
+        while True:
+            # Force 100 per page to minimize loops, and specify current page
+            doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany&perPage=100&page={page}"
+            docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
+            
+            if not docs_json or 'resources' not in docs_json or not docs_json['resources']:
+                break # Stop turning pages if the folder is empty
+            
             for r in docs_json.get('resources', []):
                 fields_list = r.get('fields', [])
                 
@@ -177,6 +183,12 @@ def fetch_and_merge_data_v2(end_date):
                             except: pass
                                 
                 docs_data.append({'Registration': ac_info['display'], 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
+            
+            # Check if Nova tells us there is another page waiting
+            if not docs_json.get('next_page_url'):
+                break # We reached the last page!
+                
+            page += 1 # Turn to the next page and loop again
 
     # Rescue Protocol: Ensure every helicopter with a document doesn't get dropped if it has no hours-based inspection
     ac_merges = {d['MergeKey'] for d in ac_data}
