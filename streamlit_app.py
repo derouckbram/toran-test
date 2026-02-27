@@ -74,7 +74,7 @@ def fetch_and_merge_data_v2(end_date):
 
     ac_data = []
     docs_data = []
-    aircraft_registry = {} # Maps internal CAMO IDs to Tail Numbers (e.g., 'x-YQdJZodO' -> 'OOXPY')
+    aircraft_registry = {} 
 
     # 1A. Parse Standard CAMO Maintenances & Grab Internal Aircraft IDs
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
@@ -86,7 +86,7 @@ def fetch_and_merge_data_v2(end_date):
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
 
-            # Extract internal Nova ID for the aircraft (The secret sauce!)
+            # Extract internal Nova ID for the aircraft
             ac_id = None
             for f in r.get('fields', []):
                 if f.get('attribute') == 'aircraft':
@@ -128,7 +128,7 @@ def fetch_and_merge_data_v2(end_date):
                     'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
                 })
 
-    # 1B. Precision Document Fetcher (Using your exact URL structure!)
+    # 1B. Precision Document Fetcher with Aggressive Date Hunter
     for reg_merge, ac_info in aircraft_registry.items():
         doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany"
         docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
@@ -139,15 +139,36 @@ def fetch_and_merge_data_v2(end_date):
                 
                 doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
                 
-                # Hunt for the expiration date across standard fields
-                raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date') or fields.get('due_date') or fields.get('date')
                 due_date = None
-                if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-                    try: 
-                        parsed_date = pd.to_datetime(str(raw_date)).date()
-                        if parsed_date.year > 2000: due_date = parsed_date
-                    except: pass
+                
+                # PASS 1: Aggressively look for fields with expiration/validity keywords
+                for f_item in r.get('fields', []):
+                    attr = str(f_item.get('attribute', '')).lower()
+                    val = str(f_item.get('value', ''))
                     
+                    if any(kw in attr for kw in ['expir', 'valid', 'due', 'until', 'end', 'to']):
+                        if val and val.strip() not in ["", "—", "None", "null"]:
+                            try:
+                                d = pd.to_datetime(val).date()
+                                if d.year > 2000:
+                                    due_date = d
+                                    break
+                            except: pass
+                
+                # PASS 2: Fallback to ANY field with the word 'date' in it
+                if not due_date:
+                    for f_item in r.get('fields', []):
+                        attr = str(f_item.get('attribute', '')).lower()
+                        val = str(f_item.get('value', ''))
+                        if 'date' in attr:
+                            if val and val.strip() not in ["", "—", "None", "null"]:
+                                try:
+                                    d = pd.to_datetime(val).date()
+                                    if d.year > 2000:
+                                        due_date = d
+                                        break
+                                except: pass
+                                
                 docs_data.append({'Registration': ac_info['display'], 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
 
     # Rescue Protocol: Ensure every helicopter with a document doesn't get dropped if it has no hours-based inspection
