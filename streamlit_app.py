@@ -11,7 +11,7 @@ import base64
 st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
 
 # --- Weather Setup for Welcome Screen ---
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60) # Reduced weather cache to 1 minute to keep it fresh
 def get_ebkt_weather():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kn"
@@ -88,7 +88,7 @@ def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 # --- Core Logic ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60) # Dropped cache time to match the 1-minute TV refresh
 def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
@@ -241,7 +241,8 @@ def fetch_and_merge_data_v2(end_date):
                                     'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 
                                     'Planned': dur, 
                                     'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
+                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
+                                    'Instructor': f.get('instructor_name', 'Toran Team')
                                 })
                 
                 for b in week_data.get('blockings', []):
@@ -250,7 +251,7 @@ def fetch_and_merge_data_v2(end_date):
                         dur = (pd.to_datetime(b.get('end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                         for h in b.get('helis'):
                             reg = id_map.get(str(h.get('id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description','')})
+                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description',''), 'Instructor': '-'})
         except: pass
 
     df_books = pd.DataFrame(book_list)
@@ -278,13 +279,27 @@ def fetch_and_merge_data_v2(end_date):
     
     return df, df_books, df_defects
 
-# --- UI Sidebar ---
+# --- UI Sidebar & Mode Tracking ---
+
+# Check the URL parameters to remember our mode after a 60-second TV refresh!
+if "mode" in st.query_params and st.query_params["mode"] == "tv":
+    default_index = 1
+else:
+    default_index = 0
+
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError: pass 
     st.markdown("<br>", unsafe_allow_html=True)
     
-    app_mode = st.radio("🖥️ Select Display Mode", ["Maintenance Dashboard", "Guest Welcome Screen"])
+    app_mode = st.radio("🖥️ Select Display Mode", ["Maintenance Dashboard", "Guest Welcome Screen"], index=default_index)
+    
+    # Save the selected mode to the URL so it survives refreshes
+    if app_mode == "Guest Welcome Screen":
+        st.query_params["mode"] = "tv"
+    else:
+        st.query_params.clear()
+
     st.markdown("---")
     
     default_date = datetime.today() + timedelta(days=35)
@@ -294,7 +309,6 @@ with st.sidebar:
         st.rerun()
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
-
 
 # ==========================================
 # MODE 1: MAINTENANCE DASHBOARD
@@ -410,8 +424,9 @@ if app_mode == "Maintenance Dashboard":
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 elif app_mode == "Guest Welcome Screen":
+    # 60 Second Auto-Refresh to keep clock accurate!
     st.markdown("""
-        <meta http-equiv="refresh" content="300">
+        <meta http-equiv="refresh" content="60">
         <style>
         [data-testid="collapsedControl"] { display: none; }
         [data-testid="stSidebar"] { display: none; }
@@ -442,10 +457,11 @@ elif app_mode == "Guest Welcome Screen":
         try:
             with open("toran_logo.png", "rb") as image_file:
                 encoded_logo = base64.b64encode(image_file.read()).decode()
-            logo_html = f'<a href="/" target="_self"><img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Dashboard"></a>'
+            # Clicking the logo routes back to Admin mode!
+            logo_html = f'<a href="/?mode=admin" target="_self"><img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Dashboard"></a>'
             st.markdown(logo_html, unsafe_allow_html=True)
         except FileNotFoundError:
-            st.markdown('<a href="/" target="_self" style="text-decoration:none;"><h1 style="color:#000000;" class="clickable-logo">TORAN HELICOPTERS</h1></a>', unsafe_allow_html=True)
+            st.markdown('<a href="/?mode=admin" target="_self" style="text-decoration:none;"><h1 style="color:#000000;" class="clickable-logo">TORAN HELICOPTERS</h1></a>', unsafe_allow_html=True)
     with head_col2:
         st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
 
@@ -458,7 +474,6 @@ elif app_mode == "Guest Welcome Screen":
         raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         raw_books_df['Local_End'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         
-        # --- THE FIX: Include everything that is NOT a "Blocking" ---
         today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] != 'Blocking')].copy()
         
         if not today_flights.empty:
