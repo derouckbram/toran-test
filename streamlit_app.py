@@ -14,11 +14,9 @@ st.set_page_config(page_title="Toran Operations Center", layout="wide", page_ico
 @st.cache_data(ttl=600) 
 def get_ebkt_weather():
     try:
-        # Fetching elaborate data: Temp, Wind Speed/Dir, Clouds, Visibility, and Pressure
         url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kn"
         data = requests.get(url, timeout=5).json()['current']
         
-        # Determine cloud description
         clouds = data['cloud_cover']
         if clouds < 10: c_desc = "Clear"
         elif clouds < 25: c_desc = "Few"
@@ -169,7 +167,13 @@ def fetch_and_merge_data_v2(end_date):
                     end = pd.to_datetime(f['reserved_end_datetime']).tz_convert(None)
                     dur = (end - start).total_seconds() / 3600 * 0.85
                     reg = id_map.get(str(f.get('heli_id', '')))
-                    if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': dur, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(), 'Instructor': pilot_map.get(str(f.get('instructor_id')), 'Toran Team')})
+                    if reg: book_list.append({
+                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': dur,
+                        'Type': str(f.get('booking_type', 'Flight')).capitalize(),
+                        'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
+                        'Instructor': pilot_map.get(str(f.get('instructor_id')), 'Toran Team'),
+                        'Departure': f.get('departure_airport_name', 'EBKT') # Added Departure extraction
+                    })
         except: pass
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
@@ -242,19 +246,25 @@ elif app_mode == "Guest Welcome Screen":
         .flight-board td {{ padding: 15px; border-bottom: 1px solid #EEE; color: #666; font-weight: 600; }}
         .active-row td {{ background-color: rgba(228, 209, 140, 0.15) !important; color: #000 !important; font-weight: 800; }}
         </style>
-        <script>
-        function updateClock() {{
-            const now = new Date();
-            document.getElementById('live-clock').innerText = now.toLocaleTimeString('en-GB', {{ hour: '2-digit', minute: '2-digit', second: '2-digit' }}) + ' Local';
-        }}
-        setInterval(updateClock, 1000);
-        </script>
     """, unsafe_allow_html=True)
 
-    now_be = pd.Timestamp.now('Europe/Brussels')
-    st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M:%S")} Local</div>', unsafe_allow_html=True)
+    # JavaScript Live Clock Fix
+    st.components.v1.html("""
+        <div style="font-family: 'Segoe UI', sans-serif; font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; width: 100%;">
+            <span id="live-clock">--:--:--</span> Local
+        </div>
+        <script>
+        function updateClock() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            document.getElementById('live-clock').innerText = timeStr;
+        }
+        updateClock();
+        setInterval(updateClock, 1000);
+        </script>
+    """, height=80)
 
-    # Process Flights
+    now_be = pd.Timestamp.now('Europe/Brussels')
     today_flights, active_flight = pd.DataFrame(), None
     if not raw_books_df.empty:
         raw_books_df['LStart'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
@@ -272,16 +282,22 @@ elif app_mode == "Guest Welcome Screen":
         st.markdown(f'<div class="welcome-title">Welcome to Toran{inline_logo_html}</div>', unsafe_allow_html=True)
         st.markdown('<div class="welcome-subtitle">Kortrijk-Wevelgem Airport (EBKT)</div>', unsafe_allow_html=True)
 
-    # Pilot-Centric Layout
     r_info, r_weather, r_img = st.columns([1.1, 1.2, 1.2])
     with r_info:
         if active_flight is not None:
-            st.markdown(f'<div class="info-card"><h3 style="margin:0;">🚁 Flight Details</h3><br><p style="font-size:26px; margin:0;"><b>Departure:</b> {active_flight["LStart"].strftime("%H:%M")}</p><p style="font-size:26px; margin:0;"><b>Tail:</b> {active_flight["Registration"]}</p></div>', unsafe_allow_html=True)
+            # Added Departure Airport to info card
+            st.markdown(f"""
+                <div class="info-card">
+                    <h3 style="margin:0;">🚁 Flight Details</h3><br>
+                    <p style="font-size:24px; margin:0;"><b>Departs:</b> {active_flight["LStart"].strftime("%H:%M")}</p>
+                    <p style="font-size:24px; margin:0;"><b>Airport:</b> {active_flight.get("Departure", "EBKT")}</p>
+                    <p style="font-size:24px; margin:0;"><b>Tail:</b> {active_flight["Registration"]}</p>
+                </div>
+            """, unsafe_allow_html=True)
         else:
             st.markdown('<div class="info-card"><h3>Toran Center</h3><p>Flight Training<br>Aerial Services</p></div>', unsafe_allow_html=True)
     
     with r_weather:
-        # Elaborate Weather Display
         st.markdown(f"""
             <div class="weather-card">
                 <div style="font-size:16px; color:#E4D18C; font-weight:800; margin-bottom:5px;">EBKT PILOT WEATHER</div>
