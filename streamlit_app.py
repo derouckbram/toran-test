@@ -37,10 +37,9 @@ AIRCRAFT_DB = {
     "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg"}
 }
 
-# --- Style Engine ---
+# --- Shared Style Engine ---
 def apply_toran_style():
-    st.markdown(
-        """
+    st.markdown("""
         <style>
         .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
@@ -52,8 +51,7 @@ def apply_toran_style():
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; }
         </style>
-        """, unsafe_allow_html=True
-    )
+    """, unsafe_allow_html=True)
 
 apply_toran_style()
 
@@ -83,63 +81,70 @@ def normalize_tail(tail):
     if not tail: return "UNKNOWN"
     return str(tail).upper().replace("-", "").replace(" ", "")
 
-# --- MAIN ENGINE: FULL MAINTENANCE & FORECASTING ---
+# --- THE PERFECT ENGINE (Restored) ---
 @st.cache_data(ttl=300)
-def fetch_comprehensive_data(end_date):
+def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
     if not c_sess or not t_sess: return None, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Aircraft & Hours
+    # 1. Maintenance & Calendar Logic
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     ac_data = []
     if maint_json:
         for r in maint_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            reg_display = str(fields.get('aircraft') or "Unknown").split(' ')[0].strip().upper()
+            reg_raw = str(fields.get('aircraft') or "Unknown")
+            reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
             try: curr = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr = 0.0
             try: limit = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit = 0.0
-            pot = max(0.0, limit - curr)
             m_type = str(fields.get('aircraftMaintenanceType', "100h"))
             try: interval = float(re.search(r'(\d+)', m_type).group(1))
             except: interval = 100.0
             raw_date = fields.get('max_valid_until')
-            due_date = pd.to_datetime(raw_date).date() if raw_date else None
-            ac_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr, 'Limit': limit, 'Type': m_type, 'Interval': interval, 'Potential': pot, 'Due Date': due_date})
+            due_date = pd.to_datetime(raw_date).date() if raw_date and str(raw_date).strip() != "—" else None
+            
+            ac_data.append({
+                'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr, 'Limit': limit, 
+                'Type': m_type, 'Interval': interval, 'Potential': max(0.0, limit - curr), 'Due Date': due_date
+            })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # 2. Defects (Deep Dive descriptions)
+    # 2. Defect Deep Dive (Restored)
     defects_list = []
     for endpoint in ['ddl-defects', 'hil-defects']:
-        d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}?perPage=50")
+        d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}?perPage=100")
         if not d_json or 'resources' not in d_json: continue
-        for r in d_json['resources']:
+        for r in d_json.get('resources', []):
             idx_f = {f['attribute']: f['value'] for f in r.get('fields', [])}
             if str(idx_f.get('status', '')).lower() in ['closed', 'gesloten', 'done']: continue
             def_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
             reg_merge = normalize_tail(str(idx_f.get('aircraft') or "").split(' ')[0])
-            desc, due = "Fetching details...", None
+            
+            # The Deep Dive Fetch
+            desc, d_due = "No description provided.", None
             det = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}/{def_id}")
             if det:
                 dfields = {f['attribute']: f['value'] for f in det['resource'].get('fields', [])}
-                for k in ['description', 'defect', 'remarks']:
+                for k in ['description', 'defect', 'remarks', 'finding']:
                     if dfields.get(k): desc = re.sub(r'<[^>]+>', '', str(dfields[k])).strip(); break
-                for dk in ['due_date', 'ultimate_repair_date']:
-                    if dfields.get(dk): 
-                        try: due = pd.to_datetime(dfields[dk]).date(); break
+                for dk in ['due_date', 'ultimate_repair_date', 'limit']:
+                    if dfields.get(dk):
+                        try: d_due = pd.to_datetime(dfields[dk]).date(); break
                         except: pass
-            defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': 'Open', 'Description': desc, 'Due Date': due})
+            defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': 'Open', 'Description': desc, 'Due Date': d_due})
     df_defects = pd.DataFrame(defects_list)
 
-    # 3. Bookings & Breaches
+    # 3. Forecast Engine (Restored)
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
     book_list, now = [], pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59)
-    for i in range(3): # Check 3 weeks
+    
+    for i in range(4): # Scan 4 weeks
         target = now + pd.Timedelta(weeks=i)
         try:
             resp = t_sess.get(f"https://admin.toran.be/api/planning?week={target.isocalendar()[1]}&year={target.isocalendar()[0]}").json()
@@ -152,7 +157,7 @@ def fetch_comprehensive_data(end_date):
                     reg = id_map.get(str(f.get('heli_id', '')))
                     if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': (end - start).total_seconds() / 3600 * 0.85, 'Type': 'Flight', 'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(), 'Departure': f.get('departure_airport_name', 'EBKT')})
         except: pass
-    
+
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
@@ -169,67 +174,66 @@ def fetch_comprehensive_data(end_date):
     df['Life Now %'] = ((df['Potential'] / df['Interval']) * 100).clip(0, 100)
     return df, df_books, df_defects
 
-# --- UI Setup ---
+# --- UI Sidebar ---
 if "mode" in st.query_params and st.query_params["mode"] == "tv": default_idx = 1
 else: default_idx = 0
 
 with st.sidebar:
     app_mode = st.radio("🖥️ Mode", ["Maintenance Dashboard", "Guest Welcome Screen"], index=default_idx)
     st.query_params["mode"] = "tv" if app_mode == "Guest Welcome Screen" else "admin"
-    selected_date = st.date_input("🗓️ Forecast End Date", value=datetime.today() + timedelta(days=35))
+    selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects = fetch_comprehensive_data(selected_date)
+df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
 # ==========================================
-# MODE 1: MAINTENANCE DASHBOARD (COMPLETE)
+# MODE 1: MAINTENANCE DASHBOARD (RESTORED)
 # ==========================================
 if app_mode == "Maintenance Dashboard":
     st.title("🚁 Operations & Maintenance Forecast")
     if df is not None:
-        # ALERTS
         today = pd.Timestamp.now().normalize()
         for _, r in df.iterrows():
             if r['Forecast'] < 0:
-                msg = f"🛑 **GROUNDING:** {r['Registration']} breaches limit on {r['Breach Date'].strftime('%d %b')}" if r['Breach Date'] else f"🛑 **GROUNDING:** {r['Registration']} is over-booked!"
-                st.error(msg)
+                st.error(f"🛑 **GROUNDING:** {r['Registration']} breaches limit on {r['Breach Date'].strftime('%d %b') if r['Breach Date'] else 'Today'}!", icon="🛑")
             if r['Due Date'] and (r['Due Date'] - today.date()).days <= 14:
-                st.warning(f"⚠️ **DOCUMENT:** {r['Registration']} calendar limit {r['Due Date'].strftime('%d %b')}")
+                st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b')}", icon="📅")
 
         tabs = st.tabs(["Fleet Overview"] + sorted(df['Registration'].tolist()))
+        
         with tabs[0]:
-            st.subheader("Fleet Summary")
+            st.subheader("Summary Table")
             st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']], hide_index=True, use_container_width=True)
-            
+
         for i, tail in enumerate(sorted(df['Registration'].tolist()), start=1):
             with tabs[i]:
                 ac_df = df[df['Registration'] == tail].iloc[0]
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Current TSN", f"{ac_df['Current']:.1f}h")
+                c1.metric("TSN", f"{ac_df['Current']:.1f}h")
                 c2.metric("Life Potential", f"{ac_df['Potential']:.1f}h")
-                c3.metric("Booked", f"{ac_df['Planned']:.1f}h")
-                c4.metric("Forecasted", f"{ac_df['Forecast']:.1f}h", delta=f"{ac_df['Forecast']-ac_df['Potential']:.1f}h")
+                c3.metric("Booked Hours", f"{ac_df['Planned']:.1f}h")
+                c4.metric("Forecast", f"{ac_df['Forecast']:.1f}h", delta=f"{ac_df['Forecast']-ac_df['Potential']:.1f}h")
                 
                 st.markdown("---")
-                col_def, col_log = st.columns(2)
-                with col_def:
+                col1, col2 = st.columns(2)
+                with col1:
                     st.subheader("🛠️ Open Defects")
                     ac_def = df_defects[df_defects['MergeKey'] == normalize_tail(tail)] if not df_defects.empty else pd.DataFrame()
-                    if not ac_def.empty: st.dataframe(ac_def[['ID', 'Status', 'Due Date', 'Description']], hide_index=True)
-                    else: st.info("No open defects.")
-                with col_log:
-                    st.subheader("📋 Upcoming Flights")
-                    ac_log = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)] if not raw_books_df.empty else pd.DataFrame()
-                    if not ac_log.empty: st.dataframe(ac_log[['Start', 'Details', 'Departure']], hide_index=True)
-                    else: st.info("No flights scheduled.")
+                    if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True)
+                    else: st.info("✅ No defects found.")
+                with col2:
+                    st.subheader("📋 Flight Log")
+                    ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)] if not raw_books_df.empty else pd.DataFrame()
+                    if not ac_b.empty: st.dataframe(ac_b[['Start', 'Details', 'Departure', 'Planned']], hide_index=True)
+                    else: st.info("No bookings found.")
 
 # ==========================================
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 else:
     try:
-        with open("Asset 4@4x.jpg", "rb") as f: data = base64.b64encode(f.read()).decode()
-        inline_logo = f'<a href="/?mode=admin" target="_self"><img src="data:image/jpeg;base64,{data}" style="height:70px; vertical-align:middle; margin-left:15px; border-radius:8px; cursor: pointer;"></a>'
+        with open("Asset 4@4x.jpg", "rb") as f: logo_data = base64.b64encode(f.read()).decode()
+        inline_logo = f'<a href="/?mode=admin" target="_self"><img src="data:image/jpeg;base64,{logo_data}" style="height:70px; vertical-align:middle; margin-left:15px; border-radius:8px; cursor: pointer;"></a>'
     except: inline_logo = '<a href="/?mode=admin" target="_self" style="text-decoration:none;">🚁</a>'
 
     st.markdown("""<meta http-equiv="refresh" content="60">
@@ -248,13 +252,21 @@ else:
         .flight-board td { padding: 12px; border-bottom: 1px solid #EEE; color: #666; font-weight: 600; }
         .active-row td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000 !important; font-weight: 800; }
         </style>
+        <script>
+        function updateClock() {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + ' Local';
+            document.getElementById('live-clock').innerText = timeStr;
+        }
+        setInterval(updateClock, 1000);
+        </script>
     """, unsafe_allow_html=True)
 
     now_be = pd.Timestamp.now('Europe/Brussels')
     col_left, col_right = st.columns([1.8, 1])
 
     with col_right:
-        st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
+        st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
         st.markdown(f'<div style="text-align:right; margin: 10px 0 20px 0;">{inline_logo}</div>', unsafe_allow_html=True)
         if not raw_books_df.empty:
             raw_books_df['LStart'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
@@ -278,7 +290,7 @@ else:
                 <p style="font-size:24px; margin:0;"><b>Airport:</b> {active_f.get("Departure", "EBKT")}</p>
                 <p style="font-size:24px; margin:0;"><b>Aircraft:</b> {active_f["Registration"]}</p></div>""", unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="welcome-title">Welcome to Toran</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="welcome-title">Welcome to Toran Helicopters</div>', unsafe_allow_html=True)
             st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk (EBKT)</div>', unsafe_allow_html=True)
 
         st.markdown(f"""<div class="weather-card"><div style="font-size:14px; color:#E4D18C; font-weight:800; margin-bottom:10px;">EBKT PILOT WEATHER</div>
