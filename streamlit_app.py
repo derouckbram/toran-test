@@ -50,7 +50,8 @@ def get_authenticated_session(base_url, login_path, email, password):
 def fetch_resource(session, base_url, resource_name):
     for prefix in ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]:
         try:
-            resp = session.get(f"{base_url.rstrip('/')}{prefix}{resource_name}", timeout=10)
+            url = f"{base_url.rstrip('/')}{prefix}{resource_name}"
+            resp = session.get(url, timeout=10)
             if resp.status_code == 200: return resp.json()
         except: continue
     return None
@@ -73,8 +74,9 @@ def fetch_and_merge_data_v2(end_date):
 
     ac_data = []
     docs_data = []
+    aircraft_registry = {} # Maps internal CAMO IDs to Tail Numbers (e.g., 'x-YQdJZodO' -> 'OOXPY')
 
-    # 1A. Parse Standard CAMO Maintenances
+    # 1A. Parse Standard CAMO Maintenances & Grab Internal Aircraft IDs
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
     if maint_json:
         for r in maint_json.get('resources', []):
@@ -83,6 +85,15 @@ def fetch_and_merge_data_v2(end_date):
             reg_raw = str(fields.get('aircraft') or "Unknown")
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
+
+            # Extract internal Nova ID for the aircraft (The secret sauce!)
+            ac_id = None
+            for f in r.get('fields', []):
+                if f.get('attribute') == 'aircraft':
+                    ac_id = f.get('belongsToId')
+            
+            if ac_id and reg_merge != "UNKNOWN":
+                aircraft_registry[reg_merge] = {'id': ac_id, 'display': reg_display}
 
             maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
             maint_lower = maint_type_str.lower()
@@ -95,7 +106,7 @@ def fetch_and_merge_data_v2(end_date):
                     if parsed_date.year > 2000: due_date = parsed_date
                 except: pass
 
-            is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance"])
+            is_doc = any(kw in maint_lower for kw in ["(official)", "airworthiness", "insurance", "arc"])
             
             if is_doc:
                 docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': maint_type_str, 'Due Date': due_date})
@@ -117,39 +128,32 @@ def fetch_and_merge_data_v2(end_date):
                     'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
                 })
 
-    # 1B. Parse Official Documents from Dedicated API Endpoint (Using your URL structure)
-    docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "documents")
-    if docs_json and 'resources' in docs_json:
-        for r in docs_json.get('resources', []):
-            fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            
-            # Find the helicopter/aircraft name
-            reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or fields.get('registration') or "Unknown")
-            # Unpack nested dictionaries if Nova returns it as a dict
-            if isinstance(fields.get('aircraft'), dict):
-                reg_raw = fields.get('aircraft').get('display', 'Unknown')
-            
-            reg_display = reg_raw.split(' ')[0].strip().upper()
-            reg_merge = normalize_tail(reg_display)
-            
-            doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
-            
-            # Find Expiration Date
-            raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date') or fields.get('due_date')
-            due_date = None
-            if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-                try: 
-                    parsed_date = pd.to_datetime(str(raw_date)).date()
-                    if parsed_date.year > 2000: due_date = parsed_date
-                except: pass
+    # 1B. Precision Document Fetcher (Using your exact URL structure!)
+    for reg_merge, ac_info in aircraft_registry.items():
+        doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany"
+        docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
+        
+        if docs_json and 'resources' in docs_json:
+            for r in docs_json.get('resources', []):
+                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                 
-            if reg_merge != "UNKNOWN" and due_date:
-                docs_data.append({'Registration': reg_display, 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
+                doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
+                
+                # Hunt for the expiration date across standard fields
+                raw_date = fields.get('expiration_date') or fields.get('valid_until') or fields.get('expiry_date') or fields.get('due_date') or fields.get('date')
+                due_date = None
+                if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
+                    try: 
+                        parsed_date = pd.to_datetime(str(raw_date)).date()
+                        if parsed_date.year > 2000: due_date = parsed_date
+                    except: pass
+                    
+                docs_data.append({'Registration': ac_info['display'], 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
 
     # Rescue Protocol: Ensure every helicopter with a document doesn't get dropped if it has no hours-based inspection
     ac_merges = {d['MergeKey'] for d in ac_data}
     for d in docs_data:
-        if d['MergeKey'] not in ac_merges:
+        if d['MergeKey'] not in ac_merges and d['MergeKey'] != "UNKNOWN":
             ac_data.append({
                 'Registration': d['Registration'], 'MergeKey': d['MergeKey'], 'Current': 0.0, 
                 'Limit': 0.0, 'Type': "Monitoring Schedule", 'Interval': 100.0, 'Potential': 999.0, 'Due Date': None
