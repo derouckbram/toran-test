@@ -54,12 +54,13 @@ def normalize_tail(tail):
     if not tail: return "UNKNOWN"
     return str(tail).upper().replace("-", "").replace(" ", "")
 
-# --- DATA FETCH (TV Version) ---
+# --- DATA FETCH (TV Version - Optimized for Speed) ---
 @st.cache_data(ttl=900)
 def fetch_tv_data():
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
     if not t_sess: return pd.DataFrame()
 
+    # Address Book
     cust_map = {}
     try:
         c_resp = t_sess.get("https://admin.toran.be/api/customers", timeout=10).json()
@@ -86,6 +87,7 @@ def fetch_tv_data():
                     'Details': guest, 'Departure': f.get('departure_airport_name', 'EBKT')
                 })
     except: pass
+    
     return pd.DataFrame(book_list)
 
 raw_books_df = fetch_tv_data()
@@ -128,30 +130,23 @@ col_left, col_right = st.columns([1.8, 1])
 with col_right:
     st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
     st.markdown(f'<div style="text-align:right; margin: 10px 0 20px 0;">{inline_logo}</div>', unsafe_allow_html=True)
-    
-    # CRASH FIX: Init variable first
-    active_f = None
-    today_flights = pd.DataFrame()
-
     if not raw_books_df.empty:
         raw_books_df['LStart'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         today_flights = raw_books_df[(raw_books_df['LStart'].dt.date == now_be.date())].sort_values('LStart')
+        active_f = None
         for _, f in today_flights.iterrows():
             if f['LStart'] > now_be - pd.Timedelta(minutes=15): active_f = f; break
-    
-    st.markdown("<h3 style='font-size:24px; font-weight:800; border-bottom:3px solid #E4D18C; display:inline-block; margin-bottom:10px;'>TODAY'S DEPARTURES</h3>", unsafe_allow_html=True)
-    if not today_flights.empty:
+        st.markdown("<h3 style='font-size:24px; font-weight:800; border-bottom:3px solid #E4D18C; display:inline-block; margin-bottom:10px;'>TODAY'S DEPARTURES</h3>", unsafe_allow_html=True)
         tbl = '<table class="flight-board"><tr><th>Time</th><th>Tail</th><th>Guest</th></tr>'
         for _, f in today_flights.iterrows():
             cls = 'class="active-row"' if active_f is not None and active_f.equals(f) else ''
             tbl += f'<tr {cls}><td>{f["LStart"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{f["Details"]}</td></tr>'
         st.markdown(tbl + '</table>', unsafe_allow_html=True)
-    else:
-        st.info("No more flights today.")
 
 with col_left:
     if active_f is not None:
-        st.markdown(f'<div class="welcome-title">Welcome, {active_f["Details"]}!</div>', unsafe_allow_html=True)
+        guest = str(active_f['Details']) if str(active_f['Details']).strip() else "Guest"
+        st.markdown(f'<div class="welcome-title">Welcome, {guest}!</div>', unsafe_allow_html=True)
         st.markdown('<div class="welcome-subtitle">Prepped and ready for departure</div>', unsafe_allow_html=True)
         st.markdown(f"""<div class="info-card"><h3 style="margin:0;">🚁 Flight Details</h3><br>
             <p style="font-size:24px; margin:0;"><b>Departs:</b> {active_f["LStart"].strftime("%H:%M")} Local</p>
