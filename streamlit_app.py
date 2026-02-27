@@ -128,29 +128,45 @@ def fetch_and_merge_data_v2(end_date):
                     'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
                 })
 
-    # 1B. Precision Document Fetcher with STRICT End-Date Hunter
+    # 1B. Precision Document Fetcher (Respecting the "Is Active" field)
     for reg_merge, ac_info in aircraft_registry.items():
         doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany"
         docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
         
         if docs_json and 'resources' in docs_json:
             for r in docs_json.get('resources', []):
-                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                fields_list = r.get('fields', [])
                 
+                # Check "Is Active" BEFORE doing anything else
+                is_active = True
+                for f_item in fields_list:
+                    attr = str(f_item.get('name', f_item.get('attribute', ''))).lower()
+                    val = f_item.get('value')
+                    
+                    if 'active' in attr or 'actief' in attr:
+                        # If the toggle is explicitly set to False, 0, or "No"
+                        if val in [False, 0, '0', 'false', 'False', 'No', 'no', None, '']:
+                            is_active = False
+                            break
+                            
+                # If the document is history, skip it immediately!
+                if not is_active:
+                    continue
+
+                # Parse the Active Document
+                fields = {f['attribute']: f['value'] for f in fields_list}
                 doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
                 
                 due_date = None
                 
-                # STRICT PASS: Hunt for the ending date, explicitly avoiding "from" or "issue" dates
-                for f_item in r.get('fields', []):
+                # Hunt for the ending date, explicitly avoiding "from" or "issue" dates
+                for f_item in fields_list:
                     attr = str(f_item.get('attribute', '')).lower()
                     val = str(f_item.get('value', ''))
                     
-                    # BLOCK words that indicate the start of validity
                     if any(bad in attr for bad in ['from', 'issue', 'start', 'begin']):
                         continue
                         
-                    # Target words that indicate expiration
                     if any(kw in attr for kw in ['expir', 'valid', 'until', 'due', 'end', 'to', 'validity']):
                         if val and str(val).strip() not in ["", "—", "None", "null"]:
                             try:
@@ -173,24 +189,13 @@ def fetch_and_merge_data_v2(end_date):
 
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey') if ac_data else pd.DataFrame()
     
-    # Process Documents Dataframe & DEDUPLICATE HISTORICAL DOCUMENTS
+    # Process Documents Dataframe
     df_docs = pd.DataFrame(docs_data)
     if not df_docs.empty:
-        # 1. Create a simplified base name (e.g., "Insurance 2023" -> "Insurance")
-        def simplify_name(name):
-            s = re.sub(r'\b20\d{2}\b', '', str(name)) # Strip years
-            s = re.sub(r'\bOO-?[A-Z]{3}\b', '', s, flags=re.IGNORECASE) # Strip tail numbers
-            return s.strip().lower()
-            
-        df_docs['BaseDoc'] = df_docs['Document'].apply(simplify_name)
+        # Sort so the highest/furthest Due Date is at the top, drop identical documents
+        df_docs = df_docs.sort_values('Due Date', ascending=False).drop_duplicates()
         
-        # 2. Sort so the highest/furthest Due Date is at the top
-        df_docs = df_docs.sort_values('Due Date', ascending=False)
-        
-        # 3. Drop all duplicates of the same document type for the same helicopter, keeping only the latest!
-        df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'BaseDoc'], keep='first')
-        
-        # 4. Calculate days left
+        # Calculate days left
         today_date = pd.Timestamp.now().normalize().date()
         df_docs['Days Left'] = df_docs['Due Date'].apply(lambda x: (x - today_date).days if pd.notnull(x) else None)
 
