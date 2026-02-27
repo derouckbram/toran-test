@@ -257,16 +257,37 @@ def fetch_and_merge_data_v2(end_date):
                 if str(active_val).lower() in ['false', '0', 'no', 'none']:
                     continue
 
-                # Aggressive Description Hunt
-                desc_raw = "Unknown Defect"
-                for k in ['description', 'defect', 'title', 'name', 'remarks', 'finding', 'fault', 'details', 'text', 'symptom']:
+                # --- ULTIMATE TEXT HUNTER ---
+                desc_raw = None
+                res_title = r.get('title') # Check top-level Nova metadata
+                
+                # 1. Search common English & Dutch field names
+                for k in ['description', 'defect', 'title', 'name', 'remarks', 'finding', 'fault', 'details', 'text', 'symptom', 'beschrijving', 'opmerking', 'klacht', 'probleem', 'issue']:
                     if fields.get(k) and str(fields.get(k)).strip() not in ["", "None", "null"]:
                         desc_raw = str(fields.get(k))
                         break
                         
-                desc_clean = re.sub(r'<[^>]+>', '', desc_raw).strip() # Strips out messy HTML formatting
+                # 2. Use Nova Resource Title if fields are empty
+                if not desc_raw and res_title and str(res_title).strip() not in ["", "None", "null"]:
+                    desc_raw = str(res_title)
+                    
+                # 3. Fallback: Find the longest descriptive text chunk in the entire item
+                if not desc_raw:
+                    longest_str = ""
+                    for k, v in fields.items():
+                        if isinstance(v, str):
+                            cv = re.sub(r'<[^>]+>', '', v).strip()
+                            if len(cv) > len(longest_str) and cv.lower() not in ['open', 'closed', 'resolved', 'yes', 'no', 'true', 'false']:
+                                if not re.match(r'^\d{4}-\d{2}-\d{2}', cv): # Ignore dates
+                                    longest_str = cv
+                    if len(longest_str) > 3:
+                        desc_raw = longest_str
+                    else:
+                        desc_raw = "Unknown Defect"
+
+                desc_clean = re.sub(r'<[^>]+>', '', desc_raw).strip() 
                 
-                # Due Date Hunt (Step 1: Check main defect fields)
+                # --- DUE DATE HUNTER ---
                 due_clean = None
                 for d_key in ['ultimate_repair_date', 'due_date', 'limit_date', 'limit', 'expiration_date', 'target_date']:
                     val = fields.get(d_key)
@@ -278,7 +299,7 @@ def fetch_and_merge_data_v2(end_date):
                                 break
                         except: pass
                 
-                # Due Date Hunt (Step 2: If no date found, dive into the defect-limitations child folder!)
+                # Sub-Folder Scan: If no date found, dive into the defect-limitations child folder!
                 if not due_clean and defect_id:
                     limit_url = f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany"
                     l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", limit_url)
@@ -386,7 +407,7 @@ with st.sidebar:
     try:
         st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError:
-        pass # Ignore silently if logo is missing
+        pass 
     
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -509,11 +530,9 @@ if df is not None:
             if df_defects is not None and not df_defects.empty:
                 ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
                 if not ac_defects.empty:
-                    # Format Dates
                     ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
                     
                     def style_defects(row):
-                        # Very subtle red/orange background to highlight open issues
                         return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
                         
                     st.dataframe(ac_defects[['Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
