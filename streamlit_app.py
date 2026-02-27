@@ -128,66 +128,55 @@ def fetch_and_merge_data_v2(end_date):
                     'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
                 })
 
-    # 1B. Precision Document Fetcher with PAGINATION (Grabs every single page!)
+    # 1B. Precision Document Fetcher (Respecting the "Is Active" field)
     for reg_merge, ac_info in aircraft_registry.items():
-        page = 1
-        while True:
-            # We ask for 100 per page to make it extremely fast, and iterate through pages if necessary
-            doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany&perPage=100&page={page}"
-            docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
-            
-            if docs_json and 'resources' in docs_json and len(docs_json['resources']) > 0:
-                for r in docs_json.get('resources', []):
-                    fields_list = r.get('fields', [])
-                    
-                    # Check "Is Active" BEFORE doing anything else
-                    is_active = True
-                    for f_item in fields_list:
-                        attr = str(f_item.get('name', f_item.get('attribute', ''))).lower()
-                        val = f_item.get('value')
-                        
-                        if 'active' in attr or 'actief' in attr:
-                            # If the toggle is explicitly set to False, 0, or "No"
-                            if val in [False, 0, '0', 'false', 'False', 'No', 'no', None, '']:
-                                is_active = False
-                                break
-                                
-                    # If the document is history, skip it immediately!
-                    if not is_active:
-                        continue
-
-                    # Parse the Active Document
-                    fields = {f['attribute']: f['value'] for f in fields_list}
-                    doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
-                    
-                    due_date = None
-                    
-                    # Hunt for the ending date, explicitly avoiding "from" or "issue" dates
-                    for f_item in fields_list:
-                        attr = str(f_item.get('attribute', '')).lower()
-                        val = str(f_item.get('value', ''))
-                        
-                        if any(bad in attr for bad in ['from', 'issue', 'start', 'begin']):
-                            continue
-                            
-                        if any(kw in attr for kw in ['expir', 'valid', 'until', 'due', 'end', 'to', 'validity']):
-                            if val and str(val).strip() not in ["", "—", "None", "null"]:
-                                try:
-                                    d = pd.to_datetime(val).date()
-                                    if d.year > 2000:
-                                        due_date = d
-                                        break
-                                except: pass
-                                    
-                    docs_data.append({'Registration': ac_info['display'], 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
+        doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany"
+        docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
+        
+        if docs_json and 'resources' in docs_json:
+            for r in docs_json.get('resources', []):
+                fields_list = r.get('fields', [])
                 
-                # Check if the server says there is a next page. If so, loop again. If not, stop.
-                if docs_json.get('next_page_url'):
-                    page += 1
-                else:
-                    break
-            else:
-                break # Break if we hit an empty page
+                # Check "Is Active" BEFORE doing anything else
+                is_active = True
+                for f_item in fields_list:
+                    attr = str(f_item.get('name', f_item.get('attribute', ''))).lower()
+                    val = f_item.get('value')
+                    
+                    if 'active' in attr or 'actief' in attr:
+                        # If the toggle is explicitly set to False, 0, or "No"
+                        if val in [False, 0, '0', 'false', 'False', 'No', 'no', None, '']:
+                            is_active = False
+                            break
+                            
+                # If the document is history, skip it immediately!
+                if not is_active:
+                    continue
+
+                # Parse the Active Document
+                fields = {f['attribute']: f['value'] for f in fields_list}
+                doc_name = str(fields.get('name') or fields.get('document_type') or fields.get('type') or fields.get('title') or "Official Document")
+                
+                due_date = None
+                
+                # Hunt for the ending date, explicitly avoiding "from" or "issue" dates
+                for f_item in fields_list:
+                    attr = str(f_item.get('attribute', '')).lower()
+                    val = str(f_item.get('value', ''))
+                    
+                    if any(bad in attr for bad in ['from', 'issue', 'start', 'begin']):
+                        continue
+                        
+                    if any(kw in attr for kw in ['expir', 'valid', 'until', 'due', 'end', 'to', 'validity']):
+                        if val and str(val).strip() not in ["", "—", "None", "null"]:
+                            try:
+                                d = pd.to_datetime(val).date()
+                                if d.year > 2000:
+                                    due_date = d
+                                    break
+                            except: pass
+                                
+                docs_data.append({'Registration': ac_info['display'], 'MergeKey': reg_merge, 'Document': doc_name, 'Due Date': due_date})
 
     # Rescue Protocol: Ensure every helicopter with a document doesn't get dropped if it has no hours-based inspection
     ac_merges = {d['MergeKey'] for d in ac_data}
@@ -439,4 +428,5 @@ if df is not None and not df.empty:
 
     with st.sidebar:
         st.markdown("---")
-        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', '
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+        st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
