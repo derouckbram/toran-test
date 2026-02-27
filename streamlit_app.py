@@ -160,27 +160,17 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Authentication Failed.", {}, pd.DataFrame(), pd.DataFrame()
 
-    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances")
+    # 1. Parse Upcoming Maintenances
+    maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     ac_data = []
-    aircraft_registry = {} # To store the internal IDs for fetching defects
-    
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
         
         reg_raw = str(fields.get('aircraft') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
-
-        # Extract internal Nova ID for the aircraft (Needed for Defects)
-        ac_id = None
-        for f in r.get('fields', []):
-            if f.get('attribute') == 'aircraft':
-                ac_id = f.get('belongsToId')
-        
-        if ac_id and reg_merge != "UNKNOWN":
-            aircraft_registry[reg_merge] = ac_id
 
         # Hours
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
@@ -218,45 +208,72 @@ def fetch_and_merge_data_v2(end_date):
     
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # --- NEW: Fetch HIL and DDL Defects ---
+    # --- 2. THE DEFECT VACUUM CLEANER ---
     defects_list = []
-    for reg_merge, ac_id in aircraft_registry.items():
-        for d_type in ['ddl', 'hil']:
-            # Using the exact targeted URL format
-            defect_url = f"{d_type}-defects?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship={d_type}&relationshipType=hasMany&perPage=100"
-            d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", defect_url)
+    # Hit the master endpoints for both DDL and HIL
+    for endpoint in ['ddl-defects', 'hil-defects']:
+        page = 1
+        while True:
+            d_url = f"{endpoint}?perPage=100&page={page}"
+            d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", d_url)
             
-            if d_json and 'resources' in d_json:
-                for r in d_json.get('resources', []):
-                    dfields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            if not d_json or 'resources' not in d_json or not d_json['resources']:
+                break
+                
+            for r in d_json.get('resources', []):
+                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                
+                # Identify the Aircraft
+                reg_raw = str(fields.get('aircraft') or fields.get('helicopter') or fields.get('registration') or "")
+                if isinstance(fields.get('aircraft'), dict): reg_raw = fields.get('aircraft').get('display', reg_raw)
+                
+                if not reg_raw or reg_raw == "None": continue
                     
-                    # Filter out Closed/Resolved items
-                    status = str(dfields.get('status', 'Open')).capitalize()
-                    if status.lower() in ['closed', 'gesloten', 'resolved', 'done']:
-                        continue
-                        
-                    # Extract description and strip HTML tags if present
-                    desc_raw = str(dfields.get('description') or dfields.get('defect') or dfields.get('title') or dfields.get('name') or "Unknown Defect")
-                    desc_clean = re.sub(r'<[^>]+>', '', desc_raw).strip()
-                    
-                    # Extract due date if applicable
-                    due = dfields.get('due_date') or dfields.get('limit_date') or dfields.get('limit')
-                    due_clean = None
-                    if due and str(due).strip() not in ["", "—", "None", "null"]:
-                        try: due_clean = pd.to_datetime(str(due)).date()
+                reg_display = reg_raw.split(' ')[0].strip().upper()
+                reg_merge = normalize_tail(reg_display)
+                
+                # Check Status - Throw away closed/resolved items!
+                status_val = str(fields.get('status', 'Open')).strip().lower()
+                active_val = fields.get('active', fields.get('is_active', True))
+                
+                if status_val in ['closed', 'gesloten', 'resolved', 'done', 'fixed', 'inactive']:
+                    continue
+                if str(active_val).lower() in ['false', '0', 'no', 'none']:
+                    continue
+
+                # Defect Description
+                desc_raw = str(fields.get('description') or fields.get('defect') or fields.get('title') or fields.get('name') or "Unknown Defect")
+                desc_clean = re.sub(r'<[^>]+>', '', desc_raw).strip() # Strips out messy HTML formatting
+                
+                # Due Date
+                due_clean = None
+                for d_key in ['due_date', 'limit_date', 'limit', 'expiration_date', 'valid_until', 'target_date']:
+                    val = fields.get(d_key)
+                    if val and str(val).strip() not in ["", "—", "None", "null"]:
+                        try:
+                            d = pd.to_datetime(str(val)).date()
+                            if d.year > 2000:
+                                due_clean = d
+                                break
                         except: pass
-                        
-                    defects_list.append({
-                        'MergeKey': reg_merge,
-                        'Type': d_type.upper(),
-                        'Status': status,
-                        'Description': desc_clean,
-                        'Due Date': due_clean
-                    })
-                    
+                
+                def_type = "DDL" if 'ddl' in endpoint else "HIL"
+                
+                defects_list.append({
+                    'MergeKey': reg_merge,
+                    'Type': def_type,
+                    'Status': str(fields.get('status', 'Open')).capitalize(),
+                    'Description': desc_clean,
+                    'Due Date': due_clean
+                })
+                
+            if not d_json.get('next_page_url'):
+                break
+            page += 1
+            
     df_defects = pd.DataFrame(defects_list)
 
-    # Fetch Toran Bookings
+    # 3. Fetch Toran Bookings
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie:
         t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
@@ -330,7 +347,7 @@ with st.sidebar:
     try:
         st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError:
-        pass # Ignore silently if logo is missing
+        pass 
     
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -344,14 +361,13 @@ st.title("Operations & Maintenance Forecast")
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
-if df is not None:
+if df is not None and not df.empty:
     today = pd.Timestamp.now().normalize()
     df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
 
     # --- GLOBAL ALERTS ---
     for _, row in df.iterrows():
         if row['Forecast'] < 0: 
-            # Display precise breach date in alert if available
             if pd.notnull(row.get('Breach Date')):
                 breach_str = row['Breach Date'].strftime('%d %b %Y')
                 st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{breach_str}**!", icon="🛑")
@@ -373,7 +389,6 @@ if df is not None:
     with tabs[0]:
         st.subheader("Fleet Summary")
         
-        # Display Table with added Breach Date column
         styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
         styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
         
@@ -409,10 +424,8 @@ if df is not None:
         with tabs[i]:
             st.subheader(f"Helicopter Details: {tail}")
             
-            # Extract data for this specific tail
             ac_df = df[df['Registration'] == tail].iloc[0]
             
-            # 4-Column Metric Layout
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
             c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
@@ -421,20 +434,17 @@ if df is not None:
             
             st.markdown("---")
             
-            # Maintenance Info Block
             col_info, col_bar = st.columns([1, 1])
             with col_info:
                 st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
                 st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
                 
-                # Calendar Due Date logic
                 if pd.notnull(ac_df['Due Date']):
                     days_text = f"(in {int(ac_df['Days Left'])} days)" if ac_df['Days Left'] >= 0 else "(EXPIRED)"
                     st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')} {days_text}")
                 else:
                     st.write("**📅 Calendar Due Date:** No date set")
                     
-                # New Breach Date Display logic
                 if pd.notnull(ac_df.get('Breach Date')):
                     st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')} (Based on bookings)")
                 else:
@@ -453,11 +463,9 @@ if df is not None:
             if df_defects is not None and not df_defects.empty:
                 ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
                 if not ac_defects.empty:
-                    # Format Dates
                     ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
                     
                     def style_defects(row):
-                        # Very subtle red/orange background to highlight open issues
                         return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
                         
                     st.dataframe(ac_defects[['Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
@@ -470,7 +478,6 @@ if df is not None:
             st.markdown("<br>", unsafe_allow_html=True)
             st.subheader("📋 Scheduled Flights & Blockings")
             
-            # Filter flight schedule for this tail using the MergeKey
             if not raw_books_df.empty:
                 detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
                 
@@ -484,7 +491,6 @@ if df is not None:
                     display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Flight Time', 'Total Used', 'Status']
                     
                     def style_rows(row):
-                        # Use the Toran Safety Red (#FF4A2B) with 20% opacity for grounded rows
                         return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
                     
                     st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
@@ -495,6 +501,5 @@ if df is not None:
 
     with st.sidebar:
         st.markdown("---")
-        # Included Breach Date in the downloadable CSV
         csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
