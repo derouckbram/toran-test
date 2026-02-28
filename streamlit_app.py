@@ -8,7 +8,55 @@ from datetime import datetime, timedelta
 import base64
 
 # --- Page Config ---
-st.set_page_config(page_title="Toran Maintenance", layout="wide", page_icon="🚁")
+st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
+
+# --- Weather Setup ---
+@st.cache_data(ttl=900)
+def get_ebkt_weather():
+    try:
+        url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kn"
+        data = requests.get(url, timeout=5).json()['current']
+        clouds = data['cloud_cover']
+        c_desc = "Clear" if clouds < 10 else "Few" if clouds < 25 else "Sct" if clouds < 50 else "Bkn" if clouds < 85 else "Ovc"
+        return {
+            "temp": f"{data['temperature_2m']}°C",
+            "wind_spd": f"{data['wind_speed_10m']} KT",
+            "wind_deg": f"{data['wind_direction_10m']}°",
+            "clouds": f"{c_desc} ({clouds}%)",
+            "vis": f"{round(data['visibility'] / 1000, 1)} KM",
+            "qnh": f"{round(data['surface_pressure'])} hPa"
+        }
+    except:
+        return {"temp": "--", "wind_spd": "--", "wind_deg": "--", "clouds": "--", "vis": "--", "qnh": "--"}
+
+weather = get_ebkt_weather()
+
+# --- Aircraft Image Database ---
+AIRCRAFT_DB = {
+    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
+}
+
+# --- Style Engine ---
+def apply_toran_style():
+    st.markdown(
+        """
+        <style>
+        .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
+        .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
+        .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
+        .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
+        [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; border-left: 5px solid #E4D18C; }
+        [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
+        [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
+        [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
+        .stProgress > div > div > div > div { background-color: #E4D18C !important; }
+        </style>
+        """, unsafe_allow_html=True
+    )
+
+apply_toran_style()
 
 # --- Helper Functions ---
 def get_authenticated_session(base_url, login_path, email, password):
@@ -46,7 +94,7 @@ def fetch_and_merge_data_master(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
     # 1. UPCOMING MAINTENANCE (The Limit)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -183,7 +231,11 @@ def fetch_and_merge_data_master(end_date):
                 if f.get('status') == 'confirmed':
                     start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
-                    if start > end_dt: continue
+                    
+                    # --- CRITICAL FIX: Only count FUTURE flights ---
+                    if start < now: continue  # Skip past flights
+                    if start > end_dt: continue # Skip flights past user selection
+                    
                     reg = id_map.get(str(f.get('heli_id', '')))
                     
                     guest = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
@@ -202,13 +254,17 @@ def fetch_and_merge_data_master(end_date):
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
+        # Cumulative Sum for Breaches
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
+        
+        # Merge with Potential for Breach Check
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         
+        # Identify Breach Dates
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
-        usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
         
+        usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
