@@ -71,8 +71,7 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # --- CRITICAL: Attach XSRF Token to CAMO Session ---
-    # Without this, the specific "viaResource" queries will fail silently!
+    # --- CRITICAL FIX: Attach XSRF Tokens to Headers ---
     c_xsrf = c_sess.cookies.get('XSRF-TOKEN')
     if c_xsrf: 
         c_sess.headers.update({
@@ -118,7 +117,7 @@ def fetch_and_merge_data_v2(end_date):
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
         
-        # Link Aircraft ID (This is the "x-4zbqjrdp" value we need!)
+        # Link Aircraft ID (Critical for fallback)
         ac_id = None
         for f in r.get('fields', []):
             if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
@@ -132,7 +131,7 @@ def fetch_and_merge_data_v2(end_date):
         last_val = 0.0
         found_baseline = False
         
-        # 1. Check explicit min_hours
+        # 1. Check explicit min_hours field
         if fields.get('min_hours'):
             try: 
                 last_val = float(str(fields.get('min_hours')).replace(',', ''))
@@ -144,11 +143,10 @@ def fetch_and_merge_data_v2(end_date):
             last_val = last_maint_map[reg_merge]
             if last_val < due_val: found_baseline = True
 
-        # 3. SURGEON STRATEGY: Direct Lookup using ID + Correct Relationship
+        # 3. SURGEON STRATEGY: Direct Lookup using ID + maintenanceHistory
         if not found_baseline and ac_id:
             try:
-                # Correct params based on your log: 
-                # viaResource=aircraft, viaResourceId={ac_id}, viaRelationship=maintenanceHistory (Singular!)
+                # Using the exact parameters found in your network log
                 rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&relationshipType=hasMany&perPage=5&orderBy=date&orderByDirection=desc"
                 deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", rel_url)
                 
@@ -159,7 +157,7 @@ def fetch_and_merge_data_v2(end_date):
                         if d_val_raw:
                             d_val = float(str(d_val_raw).replace(',', ''))
                             # Only accept records that are BEFORE the next due limit
-                            if d_val < due_val:
+                            if d_val <= due_val:
                                 last_val = d_val
                                 found_baseline = True
                                 break
@@ -175,6 +173,7 @@ def fetch_and_merge_data_v2(end_date):
             except: interval = 100.0
             last_val = due_val - interval 
         
+        # Safety: Prevent div/0
         if interval <= 0.1: interval = 100.0
 
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
@@ -351,10 +350,6 @@ with st.sidebar:
     if st.button('🔄 Refresh Data', use_container_width=True): 
         st.cache_data.clear()
         st.rerun()
-    
-    # --- DEBUG TOGGLE ---
-    st.markdown("---")
-    show_debug = st.checkbox("🐞 Enable Debug Mode")
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
@@ -465,39 +460,3 @@ if df is not None:
         st.markdown("---")
         csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Last', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
-
-# ==========================================
-# DEBUG SECTION (Updated for safe search)
-# ==========================================
-if show_debug:
-    st.title("🐞 JSON Data Inspector")
-    
-    debug_tails = sorted(df['Registration'].unique())
-    selected_debug_tail = st.selectbox("Select Aircraft to Inspect", debug_tails)
-    c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
-    
-    # ADD XSRF TO DEBUG SESSION TOO
-    if c_sess:
-        xsrf = c_sess.cookies.get('XSRF-TOKEN')
-        if xsrf: c_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'X-Requested-With': 'XMLHttpRequest'})
-
-        st.info(f"Searching via SURGEON STRATEGY for {selected_debug_tail}...")
-        
-        # 1. Get ID
-        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft?search={selected_debug_tail}")
-        ac_id = None
-        if search_res:
-            for r in search_res.get('resources', []):
-                title = r.get('title', '')
-                if selected_debug_tail in title:
-                    ac_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
-                    break
-        
-        if ac_id:
-            st.success(f"ID Found: {ac_id}")
-            # 2. Get History
-            rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&relationshipType=hasMany&perPage=5&orderBy=date&orderByDirection=desc"
-            deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", rel_url)
-            st.json(deep_hist)
-        else:
-            st.error("ID not found")
