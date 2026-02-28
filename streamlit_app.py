@@ -71,12 +71,11 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Fetch Upcoming Maintenance (The Targets)
+    # 1. Fetch Upcoming Maintenance
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Fetch Maintenance History (BULK)
-    # Increased limit to 500 to catch older records like OEXOD's
+    # 2. Fetch Bulk Maintenance History (Attempt to get as many as possible)
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=500&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
@@ -108,7 +107,7 @@ def fetch_and_merge_data_v2(end_date):
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
         
-        # Link Aircraft ID for Deep Search fallback
+        # Link Aircraft ID for Deep Search
         ac_id = None
         for f in r.get('fields', []):
             if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
@@ -118,28 +117,27 @@ def fetch_and_merge_data_v2(end_date):
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # --- DETERMINE LAST MAINTENANCE (The "Baseline") ---
+        # --- DETERMINE LAST MAINTENANCE (The Fix) ---
         last_val = 0.0
         found_baseline = False
         
-        # Strategy 1: Check if explicit 'min_hours' exists on upcoming record
+        # 1. Check if explicitly in upcoming record
         if fields.get('min_hours'):
             try: 
                 last_val = float(str(fields.get('min_hours')).replace(',', ''))
                 if last_val > 0: found_baseline = True
             except: pass
             
-        # Strategy 2: Check the Bulk History Map
+        # 2. Check the Bulk History Map
         if not found_baseline and reg_merge in last_maint_map:
             last_val = last_maint_map[reg_merge]
-            # Sanity check: Last maintenance shouldn't be higher than Limit
+            # Validation: Last maintenance must be BEFORE the Next Limit
             if last_val < due_val: found_baseline = True
 
-        # Strategy 3: DEEP SEARCH (The Fix)
-        # If we still haven't found it (e.g. OEXOD), fetch specific history for this aircraft
+        # 3. DEEP SEARCH: If still missing, fetch specific history for this aircraft
         if not found_baseline and ac_id:
             try:
-                # Fetch just the last 5 records for this specific aircraft ID
+                # Targeted fetch: "Give me the last 5 histories for THIS specific aircraft ID"
                 deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?perPage=5&orderBy=date&orderByDirection=desc&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=aircraftMaintenanceHistories")
                 if deep_hist:
                     for dh in deep_hist.get('resources', []):
@@ -147,7 +145,7 @@ def fetch_and_merge_data_v2(end_date):
                         d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
                         if d_val_raw:
                             d_val = float(str(d_val_raw).replace(',', ''))
-                            if d_val < due_val: # Valid historical record
+                            if d_val < due_val: # Ensure it's a past record
                                 last_val = d_val
                                 found_baseline = True
                                 break
@@ -159,12 +157,12 @@ def fetch_and_merge_data_v2(end_date):
         if found_baseline:
             interval = due_val - last_val
         else:
-            # Fallback: Assume interval from name (e.g. "100h" -> 100)
+            # Fallback: Guess interval from name
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
-            last_val = due_val - interval # Back-calculate so the chart looks "full"
+            last_val = due_val - interval 
         
-        if interval <= 0.1: interval = 100.0 # Prevent div/0
+        if interval <= 0.1: interval = 100.0
 
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
 
@@ -182,33 +180,26 @@ def fetch_and_merge_data_v2(end_date):
         })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # --- DEFECT VACUUM ---
+    # --- DEFECTS ---
     defects_list = []
     for endpoint in ['ddl-defects', 'hil-defects']:
         page = 1
         while True:
             d_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}?perPage=100&page={page}")
             if not d_json or 'resources' not in d_json or not d_json['resources']: break
-                
             for r in d_json.get('resources', []):
                 index_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                 defect_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
-                
                 reg_raw = str(index_fields.get('aircraft') or index_fields.get('helicopter') or index_fields.get('registration') or "")
                 if isinstance(index_fields.get('aircraft'), dict): reg_raw = index_fields.get('aircraft').get('display', reg_raw)
                 if not reg_raw or reg_raw == "None": continue
-                    
-                reg_display = reg_raw.split(' ')[0].strip().upper()
-                reg_merge = normalize_tail(reg_display)
-                
+                reg_merge = normalize_tail(reg_raw.split(' ')[0])
                 status_val = str(index_fields.get('status', 'Open')).strip().lower()
                 active_val = index_fields.get('active', index_fields.get('is_active', True))
                 if status_val in ['closed', 'gesloten', 'resolved', 'done', 'fixed', 'inactive'] or str(active_val).lower() in ['false', '0', 'no', 'none']: continue
-
                 defect_name = str(r.get('title') or index_fields.get('name') or defect_id)
                 desc_clean = "No description provided."
                 due_clean = None
-                
                 if defect_id:
                     det_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}/{defect_id}")
                     if det_json and 'resource' in det_json:
@@ -222,11 +213,8 @@ def fetch_and_merge_data_v2(end_date):
                             if val and str(val).strip() not in ["", "—", "None", "null"]:
                                 try:
                                     d = pd.to_datetime(str(val)).date()
-                                    if d.year > 2000:
-                                        due_clean = d
-                                        break
+                                    if d.year > 2000: due_clean = d; break
                                 except: pass
-
                     if not due_clean:
                         l_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"defect-limitations?viaResource={endpoint}&viaResourceId={defect_id}&viaRelationship=defectLimitations&relationshipType=hasMany")
                         if l_json and 'resources' in l_json:
@@ -237,16 +225,10 @@ def fetch_and_merge_data_v2(end_date):
                                     if val and str(val).strip() not in ["", "—", "None", "null"]:
                                         try:
                                             d = pd.to_datetime(str(val)).date()
-                                            if d.year > 2000:
-                                                due_clean = d
-                                                break
+                                            if d.year > 2000: due_clean = d; break
                                         except: pass
                                 if due_clean: break
-                
-                defects_list.append({
-                    'MergeKey': reg_merge, 'ID': defect_name, 'Type': "DDL" if 'ddl' in endpoint else "HIL",
-                    'Status': str(index_fields.get('status', 'Open')).capitalize(), 'Description': desc_clean, 'Due Date': due_clean
-                })
+                defects_list.append({'MergeKey': reg_merge, 'ID': defect_name, 'Type': "DDL" if 'ddl' in endpoint else "HIL", 'Status': str(index_fields.get('status', 'Open')).capitalize(), 'Description': desc_clean, 'Due Date': due_clean})
             if not d_json.get('next_page_url'): break
             page += 1
     df_defects = pd.DataFrame(defects_list)
@@ -255,7 +237,7 @@ def fetch_and_merge_data_v2(end_date):
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
-    # --- PILOT DIRECTORY FETCH ---
+    # --- PILOT DIRECTORY ---
     pilot_map = {}
     try:
         pilot_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10)
@@ -286,54 +268,30 @@ def fetch_and_merge_data_v2(end_date):
             if resp.status_code == 200:
                 week_data = resp.json()
                 for h in week_data.get('helis', []): id_map[str(h.get('id', ''))] = h.get('title', '').upper()
-                
                 for f in week_data.get('entries', []):
                     if f.get('status') == 'confirmed':
                         start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
                         if now < start <= end_dt:
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                             reg = id_map.get(str(f.get('heli_id', '')))
-                            
                             guest_name = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
-                            if not guest_name and isinstance(f.get('customer'), dict):
-                                guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
-                            if not guest_name and f.get('title'):
-                                guest_name = str(f.get('title'))
-                                
+                            if not guest_name and isinstance(f.get('customer'), dict): guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
+                            if not guest_name and f.get('title'): guest_name = str(f.get('title'))
                             instructor_name = ""
                             for k in ['pilot_name', 'instructor_name', 'pic_name', 'crew_name']:
-                                if isinstance(f.get(k), str) and f.get(k).strip() and f.get(k).lower() != 'none':
-                                    instructor_name = f.get(k).strip()
-                                    break
+                                if isinstance(f.get(k), str) and f.get(k).strip() and f.get(k).lower() != 'none': instructor_name = f.get(k).strip(); break
                             if not instructor_name:
                                 for k in ['pilot', 'instructor', 'pic', 'user']:
                                     if isinstance(f.get(k), dict):
                                         name = f"{f[k].get('first_name', '')} {f[k].get('last_name', '')}".strip()
                                         if not name: name = str(f[k].get('name', ''))
-                                        if name and name.lower() != 'none':
-                                            instructor_name = name
-                                            break
+                                        if name and name.lower() != 'none': instructor_name = name; break
                             if not instructor_name:
                                 for k in ['pilot_id', 'instructor_id', 'pic_id', 'user_id', 'assigned_user_id']:
                                     val = str(f.get(k, ''))
-                                    if val in pilot_map:
-                                        instructor_name = pilot_map[val]
-                                        break
-                            if not instructor_name or instructor_name.lower() in ['none', 'nan', '', 'null']:
-                                instructor_name = 'Toran Team'
-                            
-                            if reg: 
-                                book_list.append({
-                                    'MergeKey': normalize_tail(reg), 
-                                    'Registration': reg, 
-                                    'Start': start, 
-                                    'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 
-                                    'Planned': dur, 
-                                    'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                                    'Details': guest_name,
-                                    'Instructor': instructor_name
-                                })
-                
+                                    if val in pilot_map: instructor_name = pilot_map[val]; break
+                            if not instructor_name or instructor_name.lower() in ['none', 'nan', '', 'null']: instructor_name = 'Toran Team'
+                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': guest_name, 'Instructor': instructor_name})
                 for b in week_data.get('blockings', []):
                     start = pd.to_datetime(b.get('start_datetime')).tz_convert(None)
                     if now < start <= end_dt and b.get('helis'):
@@ -349,10 +307,8 @@ def fetch_and_merge_data_v2(end_date):
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
-        
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index()
         breach_dates.rename(columns={'Start': 'Breach Date'}, inplace=True)
-        
         usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
@@ -362,7 +318,8 @@ def fetch_and_merge_data_v2(end_date):
 
     df['Forecast'] = df['Potential'] - df['Planned']
     
-    # --- UPDATED LOGIC: Real Interval Calculation ---
+    # --- FINAL CALCULATION ---
+    # Life Now % = (Hours Remaining / (Limit - Last_TTSN)) * 100
     df['Real_Interval'] = df['Limit'] - df['Last']
     df['Real_Interval'] = df['Real_Interval'].apply(lambda x: x if x > 0.1 else 100.0)
     
