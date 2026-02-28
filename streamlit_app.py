@@ -71,33 +71,26 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Fetch Upcoming Maintenance
+    # 1. Fetch Upcoming Maintenance (The Targets)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Fetch Bulk Maintenance History
-    # We grab the first 200 to cover most cases quickly
+    # 2. Fetch Bulk History (First 200 records to cover active fleet)
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
     if hist_json:
         for r in hist_json.get('resources', []):
             h_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            
-            # Extract Reg
             reg_raw = str(h_fields.get('aircraft') or "Unknown")
             if isinstance(h_fields.get('aircraft'), dict): 
                 reg_raw = h_fields.get('aircraft').get('display', reg_raw)
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
-            
-            # Extract TTSN
             val_raw = h_fields.get('ttsn') or h_fields.get('hours') or h_fields.get('total_time')
             if val_raw:
                 try:
                     val = float(str(val_raw).replace(',', ''))
-                    # Store only the most recent one (first one found due to sort)
-                    if reg_merge not in last_maint_map:
-                        last_maint_map[reg_merge] = val
+                    if reg_merge not in last_maint_map: last_maint_map[reg_merge] = val
                 except: pass
 
     ac_data = []
@@ -113,7 +106,7 @@ def fetch_and_merge_data_v2(end_date):
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # --- DETERMINE LAST MAINTENANCE (Updated Search Strategy) ---
+        # --- FIND LAST MAINTENANCE (The Search Strategy) ---
         last_val = 0.0
         found_baseline = False
         
@@ -129,12 +122,12 @@ def fetch_and_merge_data_v2(end_date):
             last_val = last_maint_map[reg_merge]
             if last_val < due_val: found_baseline = True
 
-        # 3. FALLBACK: Simple Search matching user's browser behavior
-        # If we haven't found a valid baseline, search SPECIFICALLY for this tail
+        # 3. NUCLEAR OPTION: Specific Search for Missing Records
+        # If we still haven't found a valid baseline (like for OEXOD), ask the server specifically for it.
         if not found_baseline:
             try:
-                # This mimics the browser request you showed me
-                search_url = f"aircraft-maintenance-histories?search={reg_display}&perPage=5&orderBy=date&orderByDirection=desc&filters=W10%3D"
+                # Mimic the browser search behavior exactly
+                search_url = f"aircraft-maintenance-histories?search={reg_display}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D"
                 deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", search_url)
                 
                 if deep_hist:
@@ -143,7 +136,7 @@ def fetch_and_merge_data_v2(end_date):
                         d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
                         if d_val_raw:
                             d_val = float(str(d_val_raw).replace(',', ''))
-                            # We only want a record that is logically "in the past" compared to the next due limit
+                            # Only accept records that are BEFORE the next due limit (sanity check)
                             if d_val < due_val:
                                 last_val = d_val
                                 found_baseline = True
@@ -156,11 +149,12 @@ def fetch_and_merge_data_v2(end_date):
         if found_baseline:
             interval = due_val - last_val
         else:
-            # Last Resort: Guess interval from name (e.g., "100h" -> 100)
+            # Last Resort: Guess interval from name
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
             last_val = due_val - interval 
         
+        # Safety: Prevent div/0 or negative intervals
         if interval <= 0.1: interval = 100.0
 
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
@@ -461,18 +455,13 @@ if df is not None:
 if show_debug:
     st.title("🐞 JSON Data Inspector")
     
-    # 1. Select an Aircraft
     debug_tails = sorted(df['Registration'].unique())
     selected_debug_tail = st.selectbox("Select Aircraft to Inspect", debug_tails)
-    
-    # 2. Find the ID for this tail
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     
     if c_sess:
         st.info(f"Searching via Simple Search for {selected_debug_tail}...")
-        
-        # Simple Search Call
-        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?search={selected_debug_tail}&perPage=10&orderBy=date&orderByDirection=desc")
+        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?search={selected_debug_tail}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D")
         
         if search_res and search_res.get('resources'):
              st.success("Found Records!")
