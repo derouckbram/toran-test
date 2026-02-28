@@ -71,11 +71,11 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Fetch Upcoming Maintenance
+    # 1. Fetch Upcoming Maintenance (The Targets)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Fetch Bulk Maintenance History (Initial Pass)
+    # 2. Fetch Bulk History (Initial Pass - cache generic checks)
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
@@ -101,66 +101,62 @@ def fetch_and_merge_data_v2(end_date):
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
         
+        # Get Aircraft ID from the relation field
+        ac_id = None
+        for f in r.get('fields', []):
+            if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
+
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
         except: curr_val = 0.0
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # --- DETERMINE LAST MAINTENANCE (The Search Strategy) ---
+        # --- STRATEGY: FIND LAST MAINTENANCE ---
         last_val = 0.0
         found_baseline = False
         
-        # 1. Check explicit min_hours in upcoming record
+        # 1. Try explicit 'min_hours' field
         if fields.get('min_hours'):
             try: 
                 last_val = float(str(fields.get('min_hours')).replace(',', ''))
                 if last_val > 0: found_baseline = True
             except: pass
             
-        # 2. Check the Bulk History Map
+        # 2. Try the Bulk Map
         if not found_baseline and reg_merge in last_maint_map:
             last_val = last_maint_map[reg_merge]
             if last_val < due_val: found_baseline = True
 
-        # 3. NUCLEAR OPTION: Specific Search for Missing Records
-        if not found_baseline:
-            # Try searching CLEAN name (e.g. OEXOD)
-            search_attempts = [reg_display]
-            # Try searching RAW name (e.g. OO-XOD or whatever was in the raw field)
-            if reg_raw and reg_raw != reg_display: search_attempts.append(reg_raw)
-            
-            for s_term in search_attempts:
-                if found_baseline: break
-                try:
-                    # Mimic the browser search behavior exactly with filters=W10%3D
-                    search_url = f"aircraft-maintenance-histories?search={s_term}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D"
-                    deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", search_url)
-                    
-                    if deep_hist:
-                        for dh in deep_hist.get('resources', []):
-                            dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
-                            d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
-                            if d_val_raw:
-                                d_val = float(str(d_val_raw).replace(',', ''))
-                                # Only accept records that are BEFORE the next due limit (sanity check)
-                                if d_val < due_val:
-                                    last_val = d_val
-                                    found_baseline = True
-                                    break
-                except: pass
+        # 3. SURGEON STRATEGY: Two-Step Lookup using correct ID and Relationship
+        if not found_baseline and ac_id:
+            try:
+                # Based on your log: viaResource=aircraft, viaResourceId={ac_id}, viaRelationship=maintenanceHistory
+                # NOTE: Singular 'maintenanceHistory' based on your network log!
+                rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&perPage=5&orderBy=date&orderByDirection=desc"
+                deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", rel_url)
+                
+                if deep_hist:
+                    for dh in deep_hist.get('resources', []):
+                        dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
+                        d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
+                        if d_val_raw:
+                            d_val = float(str(d_val_raw).replace(',', ''))
+                            # Only accept records that are BEFORE the next due limit
+                            if d_val < due_val:
+                                last_val = d_val
+                                found_baseline = True
+                                break
+            except: pass
 
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
         
-        # Calculate Interval
         if found_baseline:
             interval = due_val - last_val
         else:
-            # Last Resort: Guess interval from name
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
             last_val = due_val - interval 
         
-        # Safety: Prevent div/0 or negative intervals
         if interval <= 0.1: interval = 100.0
 
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
@@ -463,14 +459,33 @@ if show_debug:
     
     debug_tails = sorted(df['Registration'].unique())
     selected_debug_tail = st.selectbox("Select Aircraft to Inspect", debug_tails)
+    
+    # 2. Find the ID for this tail
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     
     if c_sess:
-        st.info(f"Searching via Simple Search for {selected_debug_tail}...")
-        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?search={selected_debug_tail}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D")
+        st.info(f"Searching for aircraft ID for {selected_debug_tail}...")
+        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft?search={selected_debug_tail}")
         
-        if search_res and search_res.get('resources'):
-             st.success("Found Records!")
-             st.json(search_res)
+        ac_id = None
+        if search_res:
+            for r in search_res.get('resources', []):
+                title = r.get('title', '')
+                if selected_debug_tail in title:
+                    ac_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
+                    break
+        
+        if ac_id:
+            st.success(f"Found ID for {selected_debug_tail}: {ac_id}")
+            
+            # 3. FETCH THE HISTORY FOR THIS ID
+            st.subheader(f"Raw Maintenance History for {selected_debug_tail}")
+            st.write("Checking endpoint: `aircraft-maintenance-histories` filtered by this aircraft ID...")
+            
+            # Fetch last 5 history items specifically for this aircraft
+            history_url = f"aircraft-maintenance-histories?perPage=10&orderBy=date&orderByDirection=desc&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory"
+            raw_history = fetch_resource(c_sess, "https://toran-camo.flightapp.be", history_url)
+            
+            st.json(raw_history)
         else:
-             st.error(f"No records found for {selected_debug_tail} in simple search.")
+            st.error(f"Could not find internal ID for {selected_debug_tail}")
