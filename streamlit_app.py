@@ -5,58 +5,9 @@ from bs4 import BeautifulSoup
 import urllib.parse
 import re  
 from datetime import datetime, timedelta
-import base64
 
 # --- Page Config ---
-st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
-
-# --- Weather Setup ---
-@st.cache_data(ttl=900)
-def get_ebkt_weather():
-    try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,visibility&wind_speed_unit=kn"
-        data = requests.get(url, timeout=5).json()['current']
-        clouds = data['cloud_cover']
-        c_desc = "Clear" if clouds < 10 else "Few" if clouds < 25 else "Sct" if clouds < 50 else "Bkn" if clouds < 85 else "Ovc"
-        return {
-            "temp": f"{data['temperature_2m']}°C",
-            "wind_spd": f"{data['wind_speed_10m']} KT",
-            "wind_deg": f"{data['wind_direction_10m']}°",
-            "clouds": f"{c_desc} ({clouds}%)",
-            "vis": f"{round(data['visibility'] / 1000, 1)} KM",
-            "qnh": f"{round(data['surface_pressure'])} hPa"
-        }
-    except:
-        return {"temp": "--", "wind_spd": "--", "wind_deg": "--", "clouds": "--", "vis": "--", "qnh": "--"}
-
-weather = get_ebkt_weather()
-
-# --- Aircraft Image Database ---
-AIRCRAFT_DB = {
-    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
-}
-
-# --- Style Engine ---
-def apply_toran_style():
-    st.markdown(
-        """
-        <style>
-        .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
-        .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
-        .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
-        [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; border-left: 5px solid #E4D18C; }
-        [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
-        [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
-        [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
-        .stProgress > div > div > div > div { background-color: #E4D18C !important; }
-        </style>
-        """, unsafe_allow_html=True
-    )
-
-apply_toran_style()
+st.set_page_config(page_title="Toran Maintenance", layout="wide", page_icon="🚁")
 
 # --- Helper Functions ---
 def get_authenticated_session(base_url, login_path, email, password):
@@ -88,13 +39,13 @@ def normalize_tail(tail):
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
-# --- MASTER LOGIC (Combines Forecasting + History + Deep Dive) ---
+# --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
 def fetch_and_merge_data_master(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, pd.DataFrame(), pd.DataFrame()
 
     # 1. UPCOMING MAINTENANCE (Limits)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -145,7 +96,6 @@ def fetch_and_merge_data_master(end_date):
                     try: date_val = pd.to_datetime(fields.get(k)).date(); break
                     except: pass
             
-            # Fetch Hours at Maintenance
             hist_hours = None
             for k in ['ttsn', 'hours', 'aircraft_hours', 'total_time', 'tacho']:
                 if fields.get(k):
@@ -194,7 +144,6 @@ def fetch_and_merge_data_master(end_date):
         for c in c_resp.get('data', c_resp): cust_map[str(c.get('id'))] = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
     except: pass
 
-    # Pilot Map
     pilot_map = {}
     try:
         p_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10).json()
@@ -255,11 +204,111 @@ def fetch_and_merge_data_master(end_date):
     
     return df, df_books, df_defects
 
-# --- UI Setup ---
-if "mode" in st.query_params and st.query_params["mode"] == "tv": default_idx = 1
-else: default_idx = 0
+# --- STYLE CSS ---
+st.markdown("""
+    <style>
+    .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
+    .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
+    .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
+    [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; border-left: 5px solid #E4D18C; }
+    [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
+    [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
+    [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
+    .stProgress > div > div > div > div { background-color: #E4D18C !important; }
+    </style>
+""", unsafe_allow_html=True)
 
+# --- UI EXECUTION ---
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
-    except: pass 
-    app_mode = st.radio("🖥️
+    except FileNotFoundError: pass 
+    st.markdown("### Maintenance Center")
+    selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
+    if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
+
+df, raw_books_df, df_defects = fetch_and_merge_data_master(selected_date)
+
+st.title("Operations & Maintenance Forecast")
+
+if df is not None:
+    today = pd.Timestamp.now().normalize()
+    
+    # Global Alerts
+    for _, r in df.iterrows():
+        if r['Forecast'] < 0:
+            msg = f"🛑 **GROUNDING:** {r['Registration']} breach on {r['Breach Date'].strftime('%d %b') if pd.notnull(r.get('Breach Date')) else 'Today'}!"
+            st.error(msg, icon="🛑")
+        if r['Due Date'] and (r['Due Date'] - today.date()).days <= 14:
+            st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b')}", icon="📅")
+
+    tabs = st.tabs(["Fleet Overview"] + sorted(df['Registration'].tolist()))
+    
+    with tabs[0]:
+        st.subheader("Fleet Summary")
+        cols = ['Registration', 'Type', 'Current', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']
+        st.dataframe(df[cols], 
+                     column_config={
+                         "Life Now %": st.column_config.ProgressColumn("Life Remaining", format="%.0f%%", min_value=0, max_value=100),
+                         "Life Forecast %": st.column_config.ProgressColumn("Life at Forecast", format="%.0f%%", min_value=0, max_value=100),
+                         "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY")
+                     }, hide_index=True, use_container_width=True)
+
+    for i, tail in enumerate(sorted(df['Registration'].tolist()), start=1):
+        with tabs[i]:
+            ac_df = df[df['Registration'] == tail].iloc[0]
+            
+            # Key Metrics
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Current TSN", f"{ac_df['Current']:.1f}h")
+            c2.metric("Potential", f"{ac_df['Potential']:.1f}h")
+            c3.metric("Booked", f"{ac_df['Planned']:.1f}h")
+            c4.metric("Forecast", f"{ac_df['Forecast']:.1f}h", delta=f"{ac_df['Forecast']-ac_df['Potential']:.1f}h")
+            
+            st.markdown("---")
+            
+            # Status Section
+            col_maint, col_prog = st.columns(2)
+            with col_maint:
+                st.subheader("🛠️ Maintenance Status")
+                st.write(f"**Next Due:** {ac_df['Type']} ({ac_df['Limit']:.1f}h)")
+                
+                if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
+                    last_h = f" (at {ac_df['LastHours']:.1f}h)" if pd.notnull(ac_df.get('LastHours')) else ""
+                    st.success(f"**Last Performed:** {ac_df['LastType']} on {ac_df['LastDate'].strftime('%d %b %Y')}{last_h}")
+                
+                if pd.notnull(ac_df['Due Date']):
+                    days = (ac_df['Due Date'] - today.date()).days
+                    color = "red" if days < 14 else "green"
+                    st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
+
+            with col_prog:
+                st.subheader("📊 Life Status")
+                st.write("**Life Remaining NOW:**")
+                st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}%")
+                st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):**")
+                st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}%")
+
+            st.markdown("---")
+            
+            # Details Section
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("⚠️ Open Defects")
+                if not df_defects.empty and 'MergeKey' in df_defects.columns:
+                    ac_def = df_defects[df_defects['MergeKey'] == normalize_tail(tail)]
+                    if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True, use_container_width=True)
+                    else: st.info("✅ No open defects.")
+                else: st.info("✅ No open defects.")
+            with col2:
+                st.subheader("📋 Flight Log")
+                if not raw_books_df.empty:
+                    ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
+                    if not ac_b.empty: st.dataframe(ac_b[['Start', 'Type', 'Details', 'Instructor', 'Planned']], hide_index=True, use_container_width=True)
+                    else: st.info("No bookings found.")
+    
+    # Download Button
+    with st.sidebar:
+        st.markdown("---")
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+        st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
