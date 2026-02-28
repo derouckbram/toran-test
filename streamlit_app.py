@@ -158,7 +158,7 @@ def fetch_and_merge_data_master(end_date):
             df_hist = pd.DataFrame(hist_list).sort_values('LastDate', ascending=False).drop_duplicates('MergeKey')
             df_ac = pd.merge(df_ac, df_hist, on='MergeKey', how='left')
 
-    # 3. DOCUMENTS (FIXED SAFETY CHECK)
+    # 3. DOCUMENTS (CRASH FIX APPLIED)
     doc_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-documents?perPage=100")
     doc_list = []
     if doc_json:
@@ -167,6 +167,7 @@ def fetch_and_merge_data_master(end_date):
             reg_raw = str(fields.get('aircraft') or "")
             if isinstance(fields.get('aircraft'), dict): reg_raw = fields.get('aircraft', {}).get('display', "")
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
+            
             doc_name = str(fields.get('name') or fields.get('type') or "Document")
             valid_until = None
             for k in ['valid_until', 'expiry_date', 'expires_at']:
@@ -182,9 +183,11 @@ def fetch_and_merge_data_master(end_date):
                     'Days Left': (valid_until - datetime.now().date()).days
                 })
     
+    # SAFE DATAFRAME CREATION
     if doc_list:
         df_docs = pd.DataFrame(doc_list).sort_values('Valid Until')
     else:
+        # Create empty DataFrame with correct columns to prevent KeyError later
         df_docs = pd.DataFrame(columns=['MergeKey', 'Document', 'Valid Until', 'Days Left'])
 
     # 4. DEFECTS
@@ -359,8 +362,8 @@ if df is not None:
                 ac_docs = df_docs[df_docs['MergeKey'] == normalize_tail(tail)]
                 if not ac_docs.empty:
                     st.dataframe(ac_docs[['Document', 'Valid Until', 'Days Left']], hide_index=True, use_container_width=True)
-                else: st.info("No documents found.")
-            else: st.info("No documents found.")
+                else: st.info("No active documents found.")
+            else: st.info("No active documents found.")
 
             st.markdown("---")
             col1, col2 = st.columns(2)
