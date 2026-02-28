@@ -33,15 +33,14 @@ weather = get_ebkt_weather()
 
 # --- Aircraft Image Database ---
 AIRCRAFT_DB = {
-    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
+    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg"},
+    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg"},
+    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg"}
 }
 
 # --- Style Engine ---
 def apply_toran_style():
-    st.markdown(
-        """
+    st.markdown("""
         <style>
         .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
@@ -53,8 +52,7 @@ def apply_toran_style():
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; }
         </style>
-        """, unsafe_allow_html=True
-    )
+    """, unsafe_allow_html=True)
 
 apply_toran_style()
 
@@ -131,12 +129,8 @@ def fetch_and_merge_data_v2(end_date):
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
     # 2. LAST PERFORMED MAINTENANCE (History)
-    # New logic to fetch history and link it
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=100")
-    last_done_map = {}
-    
     if hist_json:
-        # We need to sort by date to get the latest
         hist_list = []
         for r in hist_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
@@ -150,14 +144,11 @@ def fetch_and_merge_data_v2(end_date):
                     except: pass
             
             m_type = str(fields.get('type') or fields.get('name') or "Maintenance")
-            
             if reg_merge != "UNKNOWN" and date_val:
                 hist_list.append({'MergeKey': reg_merge, 'LastDate': date_val, 'LastType': m_type})
         
-        # Sort by date desc and keep top 1 per aircraft
         if hist_list:
-            df_hist = pd.DataFrame(hist_list).sort_values('LastDate', ascending=False)
-            df_hist = df_hist.drop_duplicates('MergeKey')
+            df_hist = pd.DataFrame(hist_list).sort_values('LastDate', ascending=False).drop_duplicates('MergeKey')
             df_ac = pd.merge(df_ac, df_hist, on='MergeKey', how='left')
 
     # 3. DEFECTS
@@ -238,6 +229,7 @@ def fetch_and_merge_data_v2(end_date):
 
     df['Forecast'] = df['Potential'] - df['Planned']
     df['Life Now %'] = ((df['Potential'] / df['Interval']) * 100).clip(0, 100)
+    df['Life Forecast %'] = ((df['Forecast'] / df['Interval']) * 100).clip(0, 100)
     
     return df, df_books, df_defects
 
@@ -257,7 +249,7 @@ with st.sidebar:
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
 # ==========================================
-# MODE 1: MAINTENANCE DASHBOARD (Enhanced)
+# MODE 1: MAINTENANCE DASHBOARD (Full Restore)
 # ==========================================
 if app_mode == "Maintenance Dashboard":
     st.title("Operations & Maintenance Forecast")
@@ -270,20 +262,26 @@ if app_mode == "Maintenance Dashboard":
             if r['Due Date'] and (r['Due Date'] - today.date()).days <= 14:
                 st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b')}", icon="📅")
 
-        tabs = st.tabs(["Fleet Overview"] + sorted(df['Registration'].tolist()))
+        # --- FLEET OVERVIEW TAB ---
+        tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
+        tabs = st.tabs(tab_names)
         
         with tabs[0]:
             st.subheader("Fleet Summary")
-            # Added Last Date/Last Type to the summary table
-            cols_to_show = ['Registration', 'Type', 'Current', 'Potential', 'Planned', 'Forecast', 'Due Date']
-            if 'LastDate' in df.columns: cols_to_show.extend(['LastDate', 'LastType'])
-            st.dataframe(df[cols_to_show], hide_index=True, use_container_width=True)
+            # RESTORED: Progress Bars in Main Table
+            st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']], 
+                         column_config={
+                             "Life Now %": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
+                             "Life Forecast %": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
+                             "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
+                         }, hide_index=True, use_container_width=True)
 
-        for i, tail in enumerate(sorted(df['Registration'].tolist()), start=1):
+        # --- INDIVIDUAL AIRCRAFT TABS ---
+        for i, tail in enumerate(sorted(df['Registration'].unique().tolist()), start=1):
             with tabs[i]:
                 ac_df = df[df['Registration'] == tail].iloc[0]
                 
-                # Top Metrics
+                # Metrics
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Current TSN", f"{ac_df['Current']:.1f}h")
                 c2.metric("Potential", f"{ac_df['Potential']:.1f}h")
@@ -292,35 +290,43 @@ if app_mode == "Maintenance Dashboard":
                 
                 st.markdown("---")
                 
-                # NEW: Maintenance Status Row
-                col_maint, col_def = st.columns(2)
+                # Maintenance Status & Progress Bars
+                col_maint, col_prog = st.columns(2)
                 with col_maint:
                     st.subheader("🛠️ Maintenance Status")
                     st.write(f"**Next Due:** {ac_df['Type']} ({ac_df['Limit']:.1f}h)")
                     if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
                         st.success(f"**Last Performed:** {ac_df['LastType']} on {ac_df['LastDate'].strftime('%d %b %Y')}")
-                    else:
-                        st.warning("Last performed maintenance data not found.")
-                        
+                    
                     if pd.notnull(ac_df['Due Date']):
                         days = (ac_df['Due Date'] - today.date()).days
                         color = "red" if days < 14 else "green"
                         st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
 
-                with col_def:
+                with col_prog:
+                    st.subheader("📊 Life Status")
+                    st.write("**Life Remaining NOW:**")
+                    st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}%")
+                    st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):**")
+                    st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}%")
+
+                st.markdown("---")
+                
+                # Defects & Logs
+                col1, col2 = st.columns(2)
+                with col1:
                     st.subheader("⚠️ Open Defects")
                     if not df_defects.empty and 'MergeKey' in df_defects.columns:
                         ac_def = df_defects[df_defects['MergeKey'] == normalize_tail(tail)]
                         if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True)
                         else: st.info("✅ No open defects.")
                     else: st.info("✅ No open defects.")
-                
-                st.markdown("---")
-                st.subheader("📋 Flight Log")
-                if not raw_books_df.empty:
-                    ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
-                    if not ac_b.empty: st.dataframe(ac_b[['Start', 'Type', 'Details', 'Departure', 'Planned']], hide_index=True)
-                    else: st.info("No bookings found.")
+                with col2:
+                    st.subheader("📋 Flight Log")
+                    if not raw_books_df.empty:
+                        ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
+                        if not ac_b.empty: st.dataframe(ac_b[['Start', 'Type', 'Details', 'Departure', 'Planned']], hide_index=True)
+                        else: st.info("No bookings found.")
 
 # ==========================================
 # MODE 2: GUEST WELCOME SCREEN
