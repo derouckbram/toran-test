@@ -3,35 +3,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
-import re  
+import re
 from datetime import datetime, timedelta
-import base64
 
 # --- Page Config ---
 st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
-
-# --- Weather Setup for Welcome Screen ---
-@st.cache_data(ttl=60) 
-def get_ebkt_weather():
-    try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=50.8172&longitude=3.2047&current=temperature_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kn"
-        data = requests.get(url, timeout=5).json()['current']
-        return {
-            "temp": f"{data['temperature_2m']}°C",
-            "wind": f"{data['wind_speed_10m']} kts",
-            "dir": f"{data['wind_direction_10m']}°"
-        }
-    except:
-        return {"temp": "--°C", "wind": "-- kts", "dir": "--°"}
-
-weather = get_ebkt_weather()
-
-# --- Aircraft Image Database ---
-AIRCRAFT_DB = {
-    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
-}
 
 # --- Toran Official Brand Style Engine ---
 def apply_toran_style():
@@ -335,22 +311,11 @@ def fetch_and_merge_data_v2(end_date):
     return df, df_books, df_defects
 
 # --- UI Sidebar & Mode Tracking ---
-if "mode" in st.query_params and st.query_params["mode"] == "tv":
-    default_index = 1
-else:
-    default_index = 0
-
+# Cleaned up: Removed Mode Selection
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError: pass 
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    app_mode = st.radio("🖥️ Select Display Mode", ["Maintenance Dashboard", "Guest Welcome Screen"], index=default_index)
-    
-    if app_mode == "Guest Welcome Screen": st.query_params["mode"] = "tv"
-    else: st.query_params.clear()
-
-    st.markdown("---")
     
     default_date = datetime.today() + timedelta(days=35)
     selected_date = st.date_input("🗓️ Forecast End Date", value=default_date)
@@ -361,246 +326,109 @@ with st.sidebar:
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
 # ==========================================
-# MODE 1: MAINTENANCE DASHBOARD
+# DASHBOARD LOGIC (Standardized)
 # ==========================================
-if app_mode == "Maintenance Dashboard":
-    st.title("Operations & Maintenance Forecast")
+st.title("Operations & Maintenance Forecast")
 
-    if df is not None:
-        today = pd.Timestamp.now().normalize()
-        df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
+if df is not None:
+    today = pd.Timestamp.now().normalize()
+    df['Days Left'] = pd.to_numeric((pd.to_datetime(df['Due Date']) - today).dt.days, errors='coerce')
 
-        for _, row in df.iterrows():
-            if row['Forecast'] < 0: 
-                if pd.notnull(row.get('Breach Date')):
-                    st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{row['Breach Date'].strftime('%d %b %Y')}**!", icon="🛑")
-                else:
-                    st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
-            if pd.notnull(row['Days Left']):
-                if 0 <= row['Days Left'] <= 14: st.warning(f"📅 **CALENDAR:** {row['Registration']} due in {int(row['Days Left'])} days!", icon="⚠️")
+    for _, row in df.iterrows():
+        if row['Forecast'] < 0: 
+            if pd.notnull(row.get('Breach Date')):
+                st.error(f"🛑 **GROUNDING:** {row['Registration']} will breach its hours limit on **{row['Breach Date'].strftime('%d %b %Y')}**!", icon="🛑")
+            else:
+                st.error(f"🛑 **GROUNDING:** {row['Registration']} breaches hours limit before {selected_date.strftime('%d %b')}!", icon="🛑")
+        if pd.notnull(row['Days Left']):
+            if 0 <= row['Days Left'] <= 14: st.warning(f"📅 **CALENDAR:** {row['Registration']} due in {int(row['Days Left'])} days!", icon="⚠️")
 
-        st.markdown("---")
+    st.markdown("---")
 
-        tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
-        tabs = st.tabs(tab_names)
+    tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
+    tabs = st.tabs(tab_names)
 
-        with tabs[0]:
-            st.subheader("Fleet Summary")
-            styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
-            styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
+    with tabs[0]:
+        st.subheader("Fleet Summary")
+        styled_df = df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']].copy()
+        styled_df.columns = ['Tail', 'Next Service', 'TSN', 'Limit', 'Potential', 'Life Now', 'Booked', 'Forecast', 'Life Forecast', 'Due Date', 'Est. Breach Date']
+        
+        st.dataframe(styled_df, 
+                     column_config={
+                         "Life Now": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
+                         "Life Forecast": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
+                         "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
+                         "Est. Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
+                     }, hide_index=True, use_container_width=True)
+
+        col_chart1, col_chart2 = st.columns(2)
+        with col_chart1:
+            st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
+            chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
+            chart_df.columns = ['Remaining Potential', 'Booked Hours']
+            st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
+        with col_chart2:
+            st.subheader("Calendar Days Remaining")
+            cal_df = df.dropna(subset=['Days Left']).copy()
+            if not cal_df.empty:
+                cal_chart = cal_df.sort_values('Days Left')[['Registration', 'Days Left']].set_index('Registration')
+                cal_chart.columns = ['Days Until Maintenance']
+                st.bar_chart(cal_chart, color="#E4D18C")
+
+    for i, tail in enumerate(tab_names[1:], start=1):
+        with tabs[i]:
+            st.subheader(f"Helicopter Details: {tail}")
+            ac_df = df[df['Registration'] == tail].iloc[0]
             
-            st.dataframe(styled_df, 
-                         column_config={
-                             "Life Now": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
-                             "Life Forecast": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
-                             "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
-                             "Est. Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
-                         }, hide_index=True, use_container_width=True)
-
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.subheader(f"Hours Remaining on {selected_date.strftime('%d %b %Y')}")
-                chart_df = df[['Registration', 'Forecast', 'Planned']].copy().set_index('Registration')
-                chart_df.columns = ['Remaining Potential', 'Booked Hours']
-                st.bar_chart(chart_df, color=["#E4D18C", "#666666"])
-            with col_chart2:
-                st.subheader("Calendar Days Remaining")
-                cal_df = df.dropna(subset=['Days Left']).copy()
-                if not cal_df.empty:
-                    cal_chart = cal_df.sort_values('Days Left')[['Registration', 'Days Left']].set_index('Registration')
-                    cal_chart.columns = ['Days Until Maintenance']
-                    st.bar_chart(cal_chart, color="#E4D18C")
-
-        for i, tail in enumerate(tab_names[1:], start=1):
-            with tabs[i]:
-                st.subheader(f"Helicopter Details: {tail}")
-                ac_df = df[df['Registration'] == tail].iloc[0]
-                
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
-                c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
-                c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
-                c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
-                st.markdown("---")
-                
-                col_info, col_bar = st.columns([1, 1])
-                with col_info:
-                    st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
-                    st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
-                    if pd.notnull(ac_df['Due Date']): st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')}")
-                    else: st.write("**📅 Calendar Due Date:** No date set")
-                    if pd.notnull(ac_df.get('Breach Date')): st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')}")
-                    else: st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
-                        
-                with col_bar:
-                    st.write("**Life Remaining NOW:**")
-                    st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
-                    st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
-                    st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.subheader("🛠️ Open Defects (HIL / DDL)")
-                if df_defects is not None and not df_defects.empty:
-                    ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
-                    if not ac_defects.empty:
-                        ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
-                        def style_defects(row): return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
-                        st.dataframe(ac_defects[['ID', 'Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
-                    else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
-                else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.subheader("📋 Scheduled Flights & Blockings")
-                if not raw_books_df.empty:
-                    detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
-                    if not detail_df.empty:
-                        detail_df['Date'] = detail_df['Start'].dt.strftime('%d %b %Y')
-                        detail_df['Time (UTC)'] = detail_df['Start'].dt.strftime('%H:%M') + " - " + detail_df['End'].dt.strftime('%H:%M')
-                        detail_df['Flight Time'] = detail_df['Planned'].apply(lambda x: f"{x:.1f}h")
-                        detail_df['Total Used'] = detail_df['Cumulative'].apply(lambda x: f"{x:.1f}h")
-                        detail_df['Status'] = detail_df['Is_Breach'].apply(lambda x: "🚨 BREACH" if x else "✅ OK")
-                        display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Instructor', 'Flight Time', 'Total Used', 'Status']
-                        def style_rows(row): return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
-                        st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
-                    else: st.info(f"No flights or blockings scheduled for {tail} before {selected_date.strftime('%d %b %Y')}.")
-
-        with st.sidebar:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Current TSN", f"{ac_df['Current']:.1f} h")
+            c2.metric("Remaining Potential Now", f"{ac_df['Potential']:.1f} h")
+            c3.metric(f"Booked Flights", f"{ac_df['Planned']:.1f} h")
+            c4.metric("Forecasted Potential", f"{ac_df['Forecast']:.1f} h", delta=f"{ac_df['Forecast'] - ac_df['Potential']:.1f}h")
             st.markdown("---")
-            csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
-            st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
-
-
-# ==========================================
-# MODE 2: GUEST WELCOME SCREEN
-# ==========================================
-elif app_mode == "Guest Welcome Screen":
-    st.markdown("""
-        <meta http-equiv="refresh" content="60">
-        <style>
-        [data-testid="collapsedControl"] { display: none; }
-        [data-testid="stSidebar"] { display: none; }
-        header { display: none !important; }
-        .welcome-title { font-size: 70px; font-weight: 900; color: #000000; line-height: 1.1; margin-bottom: 10px; }
-        .welcome-subtitle { font-size: 35px; font-weight: 600; color: #666666; margin-bottom: 40px; }
-        .clock-text { font-size: 50px; font-weight: 800; color: #E4D18C; text-align: right; }
-        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); margin-bottom: 30px; }
-        .info-card h3 { font-size: 35px; margin: 0 0 10px 0; color: #000000; }
-        .info-card p { font-size: 25px; margin: 0; color: #666666; }
-        .weather-card { background-color: #000000; color: #FFFFFF; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2); }
-        .weather-temp { font-size: 60px; font-weight: 800; color: #E4D18C; }
-        .weather-desc { font-size: 25px; color: #999999; }
-        .flight-board { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 22px; }
-        .flight-board th { background-color: #E4D18C; color: #000000; padding: 15px; text-align: left; font-weight: 800; }
-        .flight-board td { padding: 15px; border-bottom: 1px solid #E2E8F0; color: #666666; font-weight: 600; }
-        .flight-board tr:nth-child(even) { background-color: #F8F8F8; }
-        .active-flight td { background-color: rgba(228, 209, 140, 0.2) !important; color: #000000; font-weight: 800; }
-        .clickable-logo { transition: opacity 0.2s ease; }
-        .clickable-logo:hover { opacity: 0.8; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    now_be = pd.Timestamp.now('Europe/Brussels')
-
-    head_col1, head_col2 = st.columns([1, 1])
-    with head_col1:
-        try:
-            with open("toran_logo.png", "rb") as image_file:
-                encoded_logo = base64.b64encode(image_file.read()).decode()
-            logo_html = f'<a href="/?mode=admin" target="_self"><img class="clickable-logo" src="data:image/png;base64,{encoded_logo}" width="300" title="Return to Dashboard"></a>'
-            st.markdown(logo_html, unsafe_allow_html=True)
-        except FileNotFoundError:
-            st.markdown('<a href="/?mode=admin" target="_self" style="text-decoration:none;"><h1 style="color:#000000;" class="clickable-logo">TORAN HELICOPTERS</h1></a>', unsafe_allow_html=True)
-    with head_col2:
-        st.markdown(f'<div class="clock-text">{now_be.strftime("%H:%M")} Local</div>', unsafe_allow_html=True)
-
-    st.markdown("<br><br>", unsafe_allow_html=True)
-
-    today_flights = pd.DataFrame()
-    active_flight = None
-
-    if not raw_books_df.empty:
-        raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
-        raw_books_df['Local_End'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
-        
-        today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] != 'Blocking')].copy()
-        
-        if not today_flights.empty:
-            today_flights = today_flights.sort_values('Local_Start')
-            for _, f in today_flights.iterrows():
-                if (f['Local_End'] - now_be).total_seconds() >= -1800:
-                    active_flight = f
-                    break
-
-    guest_name = ""
-    if active_flight is not None:
-        guest_name = str(active_flight['Details']).strip()
-        if not guest_name or guest_name.lower() in ['nan', 'none']:
-            guest_name = "Guest"
-
-    if active_flight is not None:
-        st.markdown(f'<div class="welcome-title">Welcome, {guest_name}!</div>', unsafe_allow_html=True)
-        col1, col2 = st.columns([1.5, 1])
-        with col1:
-            st.markdown(f"""
-                <div class="info-card">
-                    <h3>🚁 Your Flight Details</h3>
-                    <p><b>Time:</b> {active_flight['Local_Start'].strftime('%H:%M')} Local</p>
-                    <p><b>Aircraft:</b> {active_flight['Registration']}</p>
-                    <p><b>Instructor:</b> {active_flight.get('Instructor', 'Toran Team')}</p>
-                </div>
-            """, unsafe_allow_html=True)
-        with col2:
-            tail_clean = normalize_tail(active_flight['Registration'])
-            ac_info = AIRCRAFT_DB.get(tail_clean, None)
-            if ac_info:
-                try: st.image(ac_info['image'], use_container_width=True, caption=active_flight['Registration'])
-                except FileNotFoundError: pass
-            else: st.markdown("<br>", unsafe_allow_html=True)
-                
-            st.markdown(f"""
-                <div class="weather-card" style="margin-top: 20px;">
-                    <div style="font-size: 20px; font-weight: bold; color: #E4D18C;">EBKT WEATHER</div>
-                    <div class="weather-temp">{weather['temp']}</div>
-                    <div class="weather-desc">Wind: {weather['wind']} at {weather['dir']}</div>
-                </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="welcome-title">Welcome to Toran Helicopters</div>', unsafe_allow_html=True)
-        st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk</div>', unsafe_allow_html=True)
-
-    if not today_flights.empty:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div style="font-size: 30px; font-weight: 800; color: #000000; border-bottom: 4px solid #E4D18C; display: inline-block; margin-bottom: 10px;">TODAY\'S DEPARTURES</div>', unsafe_allow_html=True)
-        
-        board_html = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th><th>Instructor</th></tr>'
-        for _, f in today_flights.iterrows():
-            row_class = 'class="active-flight"' if (active_flight is not None and active_flight.equals(f)) else ''
             
-            board_guest = str(f["Details"]).strip()
-            if not board_guest or board_guest.lower() in ['nan', 'none']: board_guest = "Guest"
-                
-            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{board_guest}</td><td>{f.get("Instructor", "-")}</td></tr>'
-        board_html += '</table>'
-        st.markdown(board_html, unsafe_allow_html=True)
-    else:
-        st.markdown("<br>", unsafe_allow_html=True)
-        empty_col1, empty_col2 = st.columns([1.5, 1])
-        with empty_col1:
-            try: st.image("raven2.jpg", use_container_width=True)
-            except FileNotFoundError: st.info("Upload 'raven2.jpg' to GitHub to display an image here!")
-        with empty_col2:
-            st.markdown(f"""
-                <div class="weather-card">
-                    <div style="font-size: 20px; font-weight: bold; color: #E4D18C;">EBKT WEATHER</div>
-                    <div class="weather-temp">{weather['temp']}</div>
-                    <div class="weather-desc">Wind: {weather['wind']} at {weather['dir']}</div>
-                </div>
-            """, unsafe_allow_html=True)
-            st.markdown(f"""
-                <div class="info-card" style="text-align: center; margin-top:20px;">
-                    <h3>Our Fleet</h3>
-                    <p>Robinson R44 Raven I</p>
-                    <p>Robinson R44 Raven II</p>
-                    <p>Guimbal Cabri G2</p>
-                </div>
-            """, unsafe_allow_html=True)
+            col_info, col_bar = st.columns([1, 1])
+            with col_info:
+                st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
+                st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                if pd.notnull(ac_df['Due Date']): st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')}")
+                else: st.write("**📅 Calendar Due Date:** No date set")
+                if pd.notnull(ac_df.get('Breach Date')): st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')}")
+                else: st.write("**✅ Flight Hours Breach Date:** No breach scheduled")
+                    
+            with col_bar:
+                st.write("**Life Remaining NOW:**")
+                st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}% (Before scheduled flights)")
+                st.write(f"**Life at Forecast Date ({selected_date.strftime('%d %b')}):**")
+                st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}% (After scheduled flights)")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.subheader("🛠️ Open Defects (HIL / DDL)")
+            if df_defects is not None and not df_defects.empty:
+                ac_defects = df_defects[df_defects['MergeKey'] == normalize_tail(tail)].copy()
+                if not ac_defects.empty:
+                    ac_defects['Due Date'] = ac_defects['Due Date'].apply(lambda x: x.strftime('%d %b %Y') if pd.notnull(x) else "No Limit")
+                    def style_defects(row): return ['background-color: rgba(255, 74, 43, 0.1)'] * len(row)
+                    st.dataframe(ac_defects[['ID', 'Type', 'Status', 'Due Date', 'Description']].style.apply(style_defects, axis=1), hide_index=True, use_container_width=True)
+                else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
+            else: st.info(f"✅ No open HIL or DDL defects for {tail}.")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.subheader("📋 Scheduled Flights & Blockings")
+            if not raw_books_df.empty:
+                detail_df = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)].copy()
+                if not detail_df.empty:
+                    detail_df['Date'] = detail_df['Start'].dt.strftime('%d %b %Y')
+                    detail_df['Time (UTC)'] = detail_df['Start'].dt.strftime('%H:%M') + " - " + detail_df['End'].dt.strftime('%H:%M')
+                    detail_df['Flight Time'] = detail_df['Planned'].apply(lambda x: f"{x:.1f}h")
+                    detail_df['Total Used'] = detail_df['Cumulative'].apply(lambda x: f"{x:.1f}h")
+                    detail_df['Status'] = detail_df['Is_Breach'].apply(lambda x: "🚨 BREACH" if x else "✅ OK")
+                    display_cols = ['Date', 'Time (UTC)', 'Type', 'Details', 'Instructor', 'Flight Time', 'Total Used', 'Status']
+                    def style_rows(row): return ['background-color: rgba(255, 74, 43, 0.2)'] * len(row) if "🚨" in row['Status'] else [''] * len(row)
+                    st.dataframe(detail_df[display_cols].style.apply(style_rows, axis=1), hide_index=True, use_container_width=True)
+                else: st.info(f"No flights or blockings scheduled for {tail} before {selected_date.strftime('%d %b %Y')}.")
+
+    with st.sidebar:
+        st.markdown("---")
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+        st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
