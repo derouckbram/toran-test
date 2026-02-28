@@ -71,8 +71,8 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # --- CRITICAL FIX: Attach XSRF Token to CAMO Session ---
-    # This was missing and caused the search/relationship queries to fail silently!
+    # --- CRITICAL: Attach XSRF Token to CAMO Session ---
+    # Without this, the specific "viaResource" queries will fail silently!
     c_xsrf = c_sess.cookies.get('XSRF-TOKEN')
     if c_xsrf: 
         c_sess.headers.update({
@@ -92,7 +92,7 @@ def fetch_and_merge_data_v2(end_date):
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Fetch Bulk Maintenance History
+    # 2. Fetch Bulk Maintenance History (First Pass)
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
@@ -118,7 +118,7 @@ def fetch_and_merge_data_v2(end_date):
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
         
-        # Link Aircraft ID
+        # Link Aircraft ID (This is the "x-4zbqjrdp" value we need!)
         ac_id = None
         for f in r.get('fields', []):
             if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
@@ -144,20 +144,22 @@ def fetch_and_merge_data_v2(end_date):
             last_val = last_maint_map[reg_merge]
             if last_val < due_val: found_baseline = True
 
-        # 3. SURGEON STRATEGY (Retrying with fixed Headers)
+        # 3. SURGEON STRATEGY: Direct Lookup using ID + Correct Relationship
         if not found_baseline and ac_id:
             try:
-                # Correct params based on your log: viaRelationship=maintenanceHistory
-                rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&perPage=5&orderBy=date&orderByDirection=desc&relationshipType=hasMany"
+                # Correct params based on your log: 
+                # viaResource=aircraft, viaResourceId={ac_id}, viaRelationship=maintenanceHistory (Singular!)
+                rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&relationshipType=hasMany&perPage=5&orderBy=date&orderByDirection=desc"
                 deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", rel_url)
                 
-                if deep_hist:
+                if deep_hist and deep_hist.get('resources'):
                     for dh in deep_hist.get('resources', []):
                         dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
                         d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
                         if d_val_raw:
                             d_val = float(str(d_val_raw).replace(',', ''))
-                            if d_val < due_val: # Only use if it makes sense (is in the past)
+                            # Only accept records that are BEFORE the next due limit
+                            if d_val < due_val:
                                 last_val = d_val
                                 found_baseline = True
                                 break
@@ -168,6 +170,7 @@ def fetch_and_merge_data_v2(end_date):
         if found_baseline:
             interval = due_val - last_val
         else:
+            # Fallback
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
             last_val = due_val - interval 
@@ -351,7 +354,7 @@ with st.sidebar:
     
     # --- DEBUG TOGGLE ---
     st.markdown("---")
-    show_debug = st.checkbox("🐞 Enable Debug Mode", value=True)
+    show_debug = st.checkbox("🐞 Enable Debug Mode")
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
@@ -493,7 +496,7 @@ if show_debug:
         if ac_id:
             st.success(f"ID Found: {ac_id}")
             # 2. Get History
-            rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&perPage=5&orderBy=date&orderByDirection=desc&relationshipType=hasMany"
+            rel_url = f"aircraft-maintenance-histories?viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=maintenanceHistory&relationshipType=hasMany&perPage=5&orderBy=date&orderByDirection=desc"
             deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", rel_url)
             st.json(deep_hist)
         else:
