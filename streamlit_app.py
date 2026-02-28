@@ -158,17 +158,15 @@ def fetch_and_merge_data_master(end_date):
             df_hist = pd.DataFrame(hist_list).sort_values('LastDate', ascending=False).drop_duplicates('MergeKey')
             df_ac = pd.merge(df_ac, df_hist, on='MergeKey', how='left')
 
-    # 3. DOCUMENTS (ARC, Insurance, etc.)
+    # 3. DOCUMENTS (FIXED SAFETY CHECK)
     doc_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-documents?perPage=100")
     doc_list = []
     if doc_json:
         for r in doc_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            
             reg_raw = str(fields.get('aircraft') or "")
             if isinstance(fields.get('aircraft'), dict): reg_raw = fields.get('aircraft', {}).get('display', "")
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
-            
             doc_name = str(fields.get('name') or fields.get('type') or "Document")
             valid_until = None
             for k in ['valid_until', 'expiry_date', 'expires_at']:
@@ -183,7 +181,11 @@ def fetch_and_merge_data_master(end_date):
                     'Valid Until': valid_until,
                     'Days Left': (valid_until - datetime.now().date()).days
                 })
-    df_docs = pd.DataFrame(doc_list).sort_values('Valid Until')
+    
+    if doc_list:
+        df_docs = pd.DataFrame(doc_list).sort_values('Valid Until')
+    else:
+        df_docs = pd.DataFrame(columns=['MergeKey', 'Document', 'Valid Until', 'Days Left'])
 
     # 4. DEFECTS
     defects_list = []
