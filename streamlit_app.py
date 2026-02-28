@@ -73,10 +73,11 @@ def fetch_and_merge_data_v2(end_date):
 
     # 1. Fetch Upcoming Maintenance (The Targets)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
-    
-    # 2. Fetch Maintenance History (The Baselines)
-    # We fetch this to find the TTSN of the *last* maintenance to calculate the interval correctly.
-    hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
+    if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
+
+    # 2. Fetch Maintenance History (BULK)
+    # Increased limit to 500 to catch older records like OEXOD's
+    hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=500&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
     if hist_json:
@@ -89,18 +90,15 @@ def fetch_and_merge_data_v2(end_date):
                 reg_raw = h_fields.get('aircraft').get('display', reg_raw)
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
             
-            # Extract TTSN of this history record
-            # Try common field names for hours in history resources
+            # Extract TTSN
             val_raw = h_fields.get('ttsn') or h_fields.get('hours') or h_fields.get('total_time')
             if val_raw:
                 try:
                     val = float(str(val_raw).replace(',', ''))
-                    # We store the first one we find because we sorted by date DESC
+                    # Store only the most recent one (first one found due to sort)
                     if reg_merge not in last_maint_map:
                         last_maint_map[reg_merge] = val
                 except: pass
-
-    if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     ac_data = []
     
@@ -109,40 +107,64 @@ def fetch_and_merge_data_v2(end_date):
         reg_raw = str(fields.get('aircraft') or "Unknown")
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
+        
+        # Link Aircraft ID for Deep Search fallback
+        ac_id = None
+        for f in r.get('fields', []):
+            if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
 
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
         except: curr_val = 0.0
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # Determine the "Last Maintenance" TTSN
-        # Priority 1: Check if 'min_hours' or 'start_hours' exists in the upcoming record
+        # --- DETERMINE LAST MAINTENANCE (The "Baseline") ---
         last_val = 0.0
         found_baseline = False
         
+        # Strategy 1: Check if explicit 'min_hours' exists on upcoming record
         if fields.get('min_hours'):
             try: 
                 last_val = float(str(fields.get('min_hours')).replace(',', ''))
-                found_baseline = True
+                if last_val > 0: found_baseline = True
             except: pass
             
-        # Priority 2: Use the history fetch map
+        # Strategy 2: Check the Bulk History Map
         if not found_baseline and reg_merge in last_maint_map:
             last_val = last_maint_map[reg_merge]
-            found_baseline = True
+            # Sanity check: Last maintenance shouldn't be higher than Limit
+            if last_val < due_val: found_baseline = True
+
+        # Strategy 3: DEEP SEARCH (The Fix)
+        # If we still haven't found it (e.g. OEXOD), fetch specific history for this aircraft
+        if not found_baseline and ac_id:
+            try:
+                # Fetch just the last 5 records for this specific aircraft ID
+                deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?perPage=5&orderBy=date&orderByDirection=desc&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=aircraftMaintenanceHistories")
+                if deep_hist:
+                    for dh in deep_hist.get('resources', []):
+                        dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
+                        d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
+                        if d_val_raw:
+                            d_val = float(str(d_val_raw).replace(',', ''))
+                            if d_val < due_val: # Valid historical record
+                                last_val = d_val
+                                found_baseline = True
+                                break
+            except: pass
 
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
         
         # Calculate Interval
-        if found_baseline and due_val > last_val:
+        if found_baseline:
             interval = due_val - last_val
         else:
-            # Fallback to Regex if history is missing or weird
+            # Fallback: Assume interval from name (e.g. "100h" -> 100)
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
-            last_val = due_val - interval # Back-calculate last val for consistency
+            last_val = due_val - interval # Back-calculate so the chart looks "full"
         
-        if interval <= 0: interval = 100.0 
+        if interval <= 0.1: interval = 100.0 # Prevent div/0
 
         potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
 
@@ -340,11 +362,9 @@ def fetch_and_merge_data_v2(end_date):
 
     df['Forecast'] = df['Potential'] - df['Planned']
     
-    # --- UPDATED LOGIC: Use Last Known Maintenance TTSN for Interval Calculation ---
-    # Life Now % = (Hours Remaining / (Limit - Last_TTSN)) * 100
+    # --- UPDATED LOGIC: Real Interval Calculation ---
     df['Real_Interval'] = df['Limit'] - df['Last']
-    # Safety: Avoid division by zero
-    df['Real_Interval'] = df['Real_Interval'].apply(lambda x: x if x > 0 else 100.0)
+    df['Real_Interval'] = df['Real_Interval'].apply(lambda x: x if x > 0.1 else 100.0)
     
     df['Life Now %'] = (df['Potential'] / df['Real_Interval']) * 100
     df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
