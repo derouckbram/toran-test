@@ -33,14 +33,15 @@ weather = get_ebkt_weather()
 
 # --- Aircraft Image Database ---
 AIRCRAFT_DB = {
-    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg"},
-    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg"},
-    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg"}
+    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
+    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
 }
 
 # --- Style Engine ---
 def apply_toran_style():
-    st.markdown("""
+    st.markdown(
+        """
         <style>
         .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
@@ -52,7 +53,8 @@ def apply_toran_style():
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; }
         </style>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True
+    )
 
 apply_toran_style()
 
@@ -92,7 +94,7 @@ def fetch_and_merge_data_v2(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
     # 1. UPCOMING MAINTENANCE (The Limit)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -128,7 +130,7 @@ def fetch_and_merge_data_v2(end_date):
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # 2. LAST PERFORMED MAINTENANCE (History)
+    # 2. LAST PERFORMED MAINTENANCE
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=100")
     if hist_json:
         hist_list = []
@@ -136,13 +138,11 @@ def fetch_and_merge_data_v2(end_date):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
             reg_raw = str(fields.get('aircraft') or "")
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
-            
             date_val = None
             for k in ['date', 'completion_date', 'performed_at']:
                 if fields.get(k):
                     try: date_val = pd.to_datetime(fields.get(k)).date(); break
                     except: pass
-            
             m_type = str(fields.get('type') or fields.get('name') or "Maintenance")
             if reg_merge != "UNKNOWN" and date_val:
                 hist_list.append({'MergeKey': reg_merge, 'LastDate': date_val, 'LastType': m_type})
@@ -159,11 +159,9 @@ def fetch_and_merge_data_v2(end_date):
         for r in d_json.get('resources', []):
             idx_f = {f['attribute']: f['value'] for f in r.get('fields', [])}
             if str(idx_f.get('status', '')).lower() in ['closed', 'gesloten', 'done']: continue
-            
             def_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
             reg_merge = normalize_tail(str(idx_f.get('aircraft') or "").split(' ')[0])
             desc, d_due = "No description provided.", None
-            
             if def_id:
                 det = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"{endpoint}/{def_id}")
                 if det and 'resource' in det:
@@ -174,11 +172,10 @@ def fetch_and_merge_data_v2(end_date):
                         if det_f.get(dk): 
                             try: d_due = pd.to_datetime(det_f[dk]).date(); break
                             except: pass
-            
             defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': 'Open', 'Description': desc, 'Due Date': d_due})
     df_defects = pd.DataFrame(defects_list)
 
-    # 4. BOOKINGS
+    # 4. BOOKINGS & BREACH CALCULATION (RESTORED)
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
     
@@ -189,18 +186,18 @@ def fetch_and_merge_data_v2(end_date):
     except: pass
 
     now = pd.Timestamp.utcnow().tz_localize(None)
-    end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59)
+    end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59, second=59)
     book_list = []
     
-    for i in range(3): 
+    for i in range(4): # Scan 4 weeks
         target = now + pd.Timedelta(weeks=i)
         try:
             resp = t_sess.get(f"https://admin.toran.be/api/planning?week={target.isocalendar()[1]}&year={target.isocalendar()[0]}").json()
             id_map = {str(h['id']): h['title'].upper() for h in resp.get('helis', [])}
             for f in resp.get('entries', []):
                 if f.get('status') == 'confirmed':
-                    start = pd.to_datetime(f['reserved_start_datetime']).tz_convert(None)
-                    end = pd.to_datetime(f['reserved_end_datetime']).tz_convert(None)
+                    start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
+                    end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
                     if start > end_dt: continue
                     reg = id_map.get(str(f.get('heli_id', '')))
                     
@@ -209,20 +206,29 @@ def fetch_and_merge_data_v2(end_date):
                     if not guest: guest = str(f.get('title', 'Guest'))
                     
                     if reg: book_list.append({
-                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 
-                        'Planned': (end - start).total_seconds() / 3600 * 0.85, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
+                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 
+                        'End': end, 'Planned': (end - start).total_seconds() / 3600 * 0.85, 
+                        'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
                         'Details': guest, 'Departure': f.get('departure_airport_name', 'EBKT')
                     })
         except: pass
 
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
-        df_books = df_books.sort_values(['MergeKey', 'Start'])
+        df_books = df_books.sort_values(by=['MergeKey', 'Start'])
+        # Cumulative Sum Calculation for Breaches
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
-        merged = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
-        merged['Is_Breach'] = merged['Cumulative'] > merged['Potential']
-        breach_dates = merged[merged['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
-        df = pd.merge(df_ac, df_books.groupby('MergeKey')['Planned'].sum().reset_index(), on='MergeKey', how='left').fillna({'Planned': 0})
+        
+        # Merge with Potential to find the exact flight that breaks the limit
+        df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
+        df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
+        
+        # Find the FIRST breach date for each aircraft
+        breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index()
+        breach_dates.rename(columns={'Start': 'Breach Date'}, inplace=True)
+        
+        usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
+        df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
         df = df_ac.assign(Planned=0, **{'Breach Date': None})
@@ -239,17 +245,17 @@ else: default_idx = 0
 
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
-    except: pass 
+    except FileNotFoundError: pass 
     app_mode = st.radio("🖥️ Mode", ["Maintenance Dashboard", "Guest Welcome Screen"], index=default_idx)
     st.query_params["mode"] = "tv" if app_mode == "Guest Welcome Screen" else "admin"
     st.markdown("---")
-    selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
+    selected_date = st.date_input("🗓️ Forecast End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
 # ==========================================
-# MODE 1: MAINTENANCE DASHBOARD (Full Restore)
+# MODE 1: MAINTENANCE DASHBOARD
 # ==========================================
 if app_mode == "Maintenance Dashboard":
     st.title("Operations & Maintenance Forecast")
@@ -257,26 +263,24 @@ if app_mode == "Maintenance Dashboard":
     if df is not None:
         today = pd.Timestamp.now().normalize()
         for _, r in df.iterrows():
-            if r['Forecast'] < 0:
-                st.error(f"🛑 **GROUNDING:** {r['Registration']} breach on {r['Breach Date'].strftime('%d %b') if pd.notnull(r['Breach Date']) else 'Today'}!", icon="🛑")
+            if r['Forecast'] < 0: 
+                msg = f"🛑 **GROUNDING:** {r['Registration']} will breach limit on **{r['Breach Date'].strftime('%d %b')}**" if pd.notnull(r.get('Breach Date')) else f"🛑 **GROUNDING:** {r['Registration']} over-booked!"
+                st.error(msg, icon="🛑")
             if r['Due Date'] and (r['Due Date'] - today.date()).days <= 14:
-                st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b')}", icon="📅")
+                st.warning(f"⚠️ **CALENDAR:** {r['Registration']} due on {r['Due Date'].strftime('%d %b')}", icon="📅")
 
-        # --- FLEET OVERVIEW TAB ---
-        tab_names = ["Fleet Overview"] + sorted(df['Registration'].unique().tolist())
-        tabs = st.tabs(tab_names)
+        tabs = st.tabs(["Fleet Overview"] + sorted(df['Registration'].unique().tolist()))
         
         with tabs[0]:
             st.subheader("Fleet Summary")
-            # RESTORED: Progress Bars in Main Table
-            st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']], 
+            st.dataframe(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date', 'Breach Date']], 
                          column_config={
                              "Life Now %": st.column_config.ProgressColumn("Life Remaining NOW", format="%.0f%%", min_value=0, max_value=100),
                              "Life Forecast %": st.column_config.ProgressColumn("Life at Forecast Date", format="%.0f%%", min_value=0, max_value=100),
                              "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
+                             "Breach Date": st.column_config.DateColumn("Est. Breach Date", format="DD MMM YYYY")
                          }, hide_index=True, use_container_width=True)
 
-        # --- INDIVIDUAL AIRCRAFT TABS ---
         for i, tail in enumerate(sorted(df['Registration'].unique().tolist()), start=1):
             with tabs[i]:
                 ac_df = df[df['Registration'] == tail].iloc[0]
@@ -290,18 +294,21 @@ if app_mode == "Maintenance Dashboard":
                 
                 st.markdown("---")
                 
-                # Maintenance Status & Progress Bars
+                # Maintenance Status
                 col_maint, col_prog = st.columns(2)
                 with col_maint:
                     st.subheader("🛠️ Maintenance Status")
                     st.write(f"**Next Due:** {ac_df['Type']} ({ac_df['Limit']:.1f}h)")
                     if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
                         st.success(f"**Last Performed:** {ac_df['LastType']} on {ac_df['LastDate'].strftime('%d %b %Y')}")
-                    
                     if pd.notnull(ac_df['Due Date']):
                         days = (ac_df['Due Date'] - today.date()).days
                         color = "red" if days < 14 else "green"
                         st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
+                        
+                    # BREACH ALERT INSIDE TAB
+                    if pd.notnull(ac_df.get('Breach Date')):
+                        st.error(f"🚨 **BREACH FORECAST:** Aircraft will exceed hours on **{ac_df['Breach Date'].strftime('%d %b %Y')}**")
 
                 with col_prog:
                     st.subheader("📊 Life Status")
@@ -311,8 +318,6 @@ if app_mode == "Maintenance Dashboard":
                     st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}%")
 
                 st.markdown("---")
-                
-                # Defects & Logs
                 col1, col2 = st.columns(2)
                 with col1:
                     st.subheader("⚠️ Open Defects")
@@ -321,8 +326,9 @@ if app_mode == "Maintenance Dashboard":
                         if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True)
                         else: st.info("✅ No open defects.")
                     else: st.info("✅ No open defects.")
+                
                 with col2:
-                    st.subheader("📋 Flight Log")
+                    st.subheader("📋 Scheduled Log")
                     if not raw_books_df.empty:
                         ac_b = raw_books_df[raw_books_df['MergeKey'] == normalize_tail(tail)]
                         if not ac_b.empty: st.dataframe(ac_b[['Start', 'Type', 'Details', 'Departure', 'Planned']], hide_index=True)
@@ -390,7 +396,8 @@ elif app_mode == "Guest Welcome Screen":
 
     with col_left:
         if active_f is not None:
-            st.markdown(f'<div class="welcome-title">Welcome, {active_f["Details"]}!</div>', unsafe_allow_html=True)
+            guest = str(active_f['Details']) if str(active_f['Details']).strip() else "Guest"
+            st.markdown(f'<div class="welcome-title">Welcome, {guest}!</div>', unsafe_allow_html=True)
             st.markdown('<div class="welcome-subtitle">Prepped and ready for departure</div>', unsafe_allow_html=True)
             st.markdown(f"""<div class="info-card"><h3 style="margin:0;">🚁 Flight Details</h3><br>
                 <p style="font-size:24px; margin:0;"><b>Departs:</b> {active_f["LStart"].strftime("%H:%M")} Local</p>
