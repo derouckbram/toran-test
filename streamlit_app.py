@@ -186,13 +186,12 @@ def fetch_and_merge_data_v2(end_date):
     xsrf_cookie = t_sess.cookies.get('XSRF-TOKEN')
     if xsrf_cookie: t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf_cookie), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
 
-    # --- NEW: PILOT DIRECTORY FETCH (Aggressive Mode) ---
+    # --- PILOT DIRECTORY FETCH ---
     pilot_map = {}
     try:
         pilot_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10)
         if pilot_resp.status_code == 200:
             p_data = pilot_resp.json()
-            # Handle different Laravel pagination structures seamlessly
             p_list = p_data.get('data', p_data.get('items', [])) if isinstance(p_data, dict) else p_data
             for p in p_list:
                 if isinstance(p, dict):
@@ -226,23 +225,17 @@ def fetch_and_merge_data_v2(end_date):
                             dur = (pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                             reg = id_map.get(str(f.get('heli_id', '')))
                             
-                            # Customer Name Logic
                             guest_name = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
                             if not guest_name and isinstance(f.get('customer'), dict):
                                 guest_name = f"{f.get('customer').get('first_name','')} {f.get('customer').get('last_name','')}".strip()
                             if not guest_name and f.get('title'):
                                 guest_name = str(f.get('title'))
                                 
-                            # --- ULTIMATE INSTRUCTOR HUNTER ---
                             instructor_name = ""
-                            
-                            # Step 1: Check obvious string fields first
                             for k in ['pilot_name', 'instructor_name', 'pic_name', 'crew_name']:
                                 if isinstance(f.get(k), str) and f.get(k).strip() and f.get(k).lower() != 'none':
                                     instructor_name = f.get(k).strip()
                                     break
-                                    
-                            # Step 2: Extract from nested objects if available
                             if not instructor_name:
                                 for k in ['pilot', 'instructor', 'pic', 'user']:
                                     if isinstance(f.get(k), dict):
@@ -251,16 +244,12 @@ def fetch_and_merge_data_v2(end_date):
                                         if name and name.lower() != 'none':
                                             instructor_name = name
                                             break
-                                            
-                            # Step 3: Match ID against the newly downloaded Pilot Directory
                             if not instructor_name:
                                 for k in ['pilot_id', 'instructor_id', 'pic_id', 'user_id', 'assigned_user_id']:
                                     val = str(f.get(k, ''))
                                     if val in pilot_map:
                                         instructor_name = pilot_map[val]
                                         break
-                                        
-                            # Step 4: Fallback
                             if not instructor_name or instructor_name.lower() in ['none', 'nan', '', 'null']:
                                 instructor_name = 'Toran Team'
                             
@@ -303,15 +292,17 @@ def fetch_and_merge_data_v2(end_date):
         df['Breach Date'] = pd.NaT
 
     df['Forecast'] = df['Potential'] - df['Planned']
-    df['Life Now %'] = (df['Potential'] / df['Interval']) * 100
+    
+    # --- FIXED: Use (Limit - Current) / Interval as requested ---
+    df['Life Now %'] = ((df['Limit'] - df['Current']) / df['Interval']) * 100
     df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
+    
     df['Life Forecast %'] = (df['Forecast'] / df['Interval']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].clip(lower=0, upper=100)
     
     return df, df_books, df_defects
 
 # --- UI Sidebar & Mode Tracking ---
-# Cleaned up: Removed Mode Selection
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError: pass 
@@ -326,7 +317,7 @@ with st.sidebar:
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
 # ==========================================
-# DASHBOARD LOGIC (Standardized)
+# DASHBOARD LOGIC
 # ==========================================
 st.title("Operations & Maintenance Forecast")
 
