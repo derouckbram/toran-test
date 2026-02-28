@@ -71,11 +71,11 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 1. Fetch Upcoming Maintenance (The Targets)
+    # 1. Fetch Upcoming Maintenance
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
-    # 2. Fetch Bulk History (First 200 records to cover active fleet)
+    # 2. Fetch Bulk Maintenance History (Initial Pass)
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
@@ -106,7 +106,7 @@ def fetch_and_merge_data_v2(end_date):
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # --- FIND LAST MAINTENANCE (The Search Strategy) ---
+        # --- DETERMINE LAST MAINTENANCE (The Search Strategy) ---
         last_val = 0.0
         found_baseline = False
         
@@ -123,25 +123,31 @@ def fetch_and_merge_data_v2(end_date):
             if last_val < due_val: found_baseline = True
 
         # 3. NUCLEAR OPTION: Specific Search for Missing Records
-        # If we still haven't found a valid baseline (like for OEXOD), ask the server specifically for it.
         if not found_baseline:
-            try:
-                # Mimic the browser search behavior exactly
-                search_url = f"aircraft-maintenance-histories?search={reg_display}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D"
-                deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", search_url)
-                
-                if deep_hist:
-                    for dh in deep_hist.get('resources', []):
-                        dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
-                        d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
-                        if d_val_raw:
-                            d_val = float(str(d_val_raw).replace(',', ''))
-                            # Only accept records that are BEFORE the next due limit (sanity check)
-                            if d_val < due_val:
-                                last_val = d_val
-                                found_baseline = True
-                                break
-            except: pass
+            # Try searching CLEAN name (e.g. OEXOD)
+            search_attempts = [reg_display]
+            # Try searching RAW name (e.g. OO-XOD or whatever was in the raw field)
+            if reg_raw and reg_raw != reg_display: search_attempts.append(reg_raw)
+            
+            for s_term in search_attempts:
+                if found_baseline: break
+                try:
+                    # Mimic the browser search behavior exactly with filters=W10%3D
+                    search_url = f"aircraft-maintenance-histories?search={s_term}&perPage=10&orderBy=date&orderByDirection=desc&filters=W10%3D"
+                    deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", search_url)
+                    
+                    if deep_hist:
+                        for dh in deep_hist.get('resources', []):
+                            dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
+                            d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
+                            if d_val_raw:
+                                d_val = float(str(d_val_raw).replace(',', ''))
+                                # Only accept records that are BEFORE the next due limit (sanity check)
+                                if d_val < due_val:
+                                    last_val = d_val
+                                    found_baseline = True
+                                    break
+                except: pass
 
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
         
