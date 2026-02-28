@@ -64,7 +64,6 @@ def fetch_and_merge_data_master(end_date):
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
-            # Default Interval (Fallback)
             maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard"))
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
@@ -206,26 +205,23 @@ def fetch_and_merge_data_master(end_date):
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
+        
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
         usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
+        
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
         df = df_ac.assign(Planned=0, **{'Breach Date': None})
 
     # --- ADVANCED PROGRESS CALCULATION ---
-    # Determine the real "Span" of the current maintenance cycle
-    df['IntervalSpan'] = df['Interval'] # Default
-    
+    df['IntervalSpan'] = df['Interval']
     if 'LastHours' in df.columns:
-        # If we have valid LastHours and it makes sense (Last < Limit)
         mask = df['LastHours'].notna() & (df['Limit'] > df['LastHours'])
-        # Span = Limit - Last Performed
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
     
-    # Calculate % Remaining based on the REAL span
     df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
     df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
     
@@ -317,11 +313,14 @@ if df is not None:
                     days = (ac_df['Due Date'] - today.date()).days
                     color = "red" if days < 14 else "green"
                     st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
+                
+                # --- NEW: CALCULATED BREACH DATE ---
+                if pd.notnull(ac_df.get('Breach Date')):
+                    st.error(f"🚨 **BREACH FORECAST:** Aircraft will exceed hours on **{ac_df['Breach Date'].strftime('%d %b %Y')}**")
 
             with col_prog:
                 st.subheader("📊 Life Status")
                 
-                # Dynamic text showing the baseline
                 baseline_txt = f" (Span: {ac_df['IntervalSpan']:.0f}h)"
                 
                 st.write(f"**Life Remaining NOW:**{baseline_txt}")
