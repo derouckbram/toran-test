@@ -48,7 +48,7 @@ def fetch_and_merge_data_master(end_date):
 
     if not c_sess or not t_sess: return None, pd.DataFrame(), pd.DataFrame()
 
-    # 1. UPCOMING MAINTENANCE (Limits)
+    # 1. UPCOMING MAINTENANCE (The Limit)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     ac_data = []
     
@@ -64,6 +64,7 @@ def fetch_and_merge_data_master(end_date):
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
+            # Default Interval (Fallback)
             maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard"))
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
@@ -97,15 +98,14 @@ def fetch_and_merge_data_master(end_date):
                     try: date_val = pd.to_datetime(fields.get(k)).date(); break
                     except: pass
             
-            # --- BROAD SPECTRUM SEARCH FOR HOURS ---
+            # BROAD SPECTRUM SEARCH FOR HOURS
             hist_hours = None
-            
             # Priority 1: Known keys
             for k in ['ttsn', 'hours', 'aircraft_hours', 'total_time', 'tacho', 'current_hours', 'aircraft_ttsn']:
                 if fields.get(k):
                     try: 
                         val = float(str(fields.get(k)).replace(',', ''))
-                        if 100 < val < 20000: # Sanity check for heli hours
+                        if 100 < val < 20000: # Sanity check
                             hist_hours = val
                             break
                     except: pass
@@ -115,12 +115,10 @@ def fetch_and_merge_data_master(end_date):
                 for k, v in fields.items():
                     if isinstance(v, (str, int, float)):
                         try:
-                            # Look for numbers that look like hours (e.g. 2450.5 or 2450)
-                            # Exclude IDs (usually integers) unless they look like hours contextually
                             val_str = str(v).replace(',', '')
                             if re.match(r'^\d+(\.\d{1,2})?$', val_str):
                                 val = float(val_str)
-                                if 500 < val < 15000: # Broad sanity check for airframe hours
+                                if 500 < val < 15000: # Broad sanity check
                                     hist_hours = val
                                     break
                         except: pass
@@ -205,33 +203,57 @@ def fetch_and_merge_data_master(end_date):
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
-        # Cumulative Sum for Breaches
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
-        
-        # Merge with Potential for Breach Check
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
-        
-        # Identify Breach Dates
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
-        
         usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
         df = df_ac.assign(Planned=0, **{'Breach Date': None})
 
+    # --- ADVANCED PROGRESS CALCULATION ---
+    # Determine the real "Span" of the current maintenance cycle
+    df['IntervalSpan'] = df['Interval'] # Default
+    
+    if 'LastHours' in df.columns:
+        # If we have valid LastHours and it makes sense (Last < Limit)
+        mask = df['LastHours'].notna() & (df['Limit'] > df['LastHours'])
+        # Span = Limit - Last Performed
+        df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
+
     df['Forecast'] = df['Potential'] - df['Planned']
-    df['Life Now %'] = ((df['Potential'] / df['Interval']) * 100).clip(0, 100)
-    df['Life Forecast %'] = ((df['Forecast'] / df['Interval']) * 100).clip(0, 100)
+    
+    # Calculate % Remaining based on the REAL span
+    df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
+    df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
+    
+    df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
+    df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
     
     return df, df_books, df_defects
 
-# --- UI Setup ---
+# --- STYLE CSS ---
+st.markdown("""
+    <style>
+    .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
+    .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
+    .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
+    [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; border-left: 5px solid #E4D18C; }
+    [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
+    [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
+    [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
+    .stProgress > div > div > div > div { background-color: #E4D18C !important; }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- UI EXECUTION ---
 with st.sidebar:
     try: st.image("toran_logo.png", use_container_width=True)
     except FileNotFoundError: pass 
-    st.markdown("---")
+    st.markdown("### Maintenance Center")
     st.write("Go to **pages/welcome_page** for TV Mode")
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
@@ -288,6 +310,8 @@ if df is not None:
                 if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
                     last_h = f" (at {ac_df['LastHours']:.1f}h)" if pd.notnull(ac_df.get('LastHours')) else ""
                     st.success(f"**Last Performed:** {ac_df['LastType']} on {ac_df['LastDate'].strftime('%d %b %Y')}{last_h}")
+                else:
+                    st.warning("History not found.")
                 
                 if pd.notnull(ac_df['Due Date']):
                     days = (ac_df['Due Date'] - today.date()).days
@@ -296,8 +320,13 @@ if df is not None:
 
             with col_prog:
                 st.subheader("📊 Life Status")
-                st.write("**Life Remaining NOW:**")
+                
+                # Dynamic text showing the baseline
+                baseline_txt = f" (Span: {ac_df['IntervalSpan']:.0f}h)"
+                
+                st.write(f"**Life Remaining NOW:**{baseline_txt}")
                 st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}%")
+                
                 st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):**")
                 st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}%")
 
