@@ -342,6 +342,10 @@ with st.sidebar:
     if st.button('🔄 Refresh Data', use_container_width=True): 
         st.cache_data.clear()
         st.rerun()
+    
+    # --- DEBUG TOGGLE ---
+    st.markdown("---")
+    show_debug = st.checkbox("🐞 Enable Debug Mode")
 
 df, raw_books_df, df_defects = fetch_and_merge_data_v2(selected_date)
 
@@ -452,3 +456,43 @@ if df is not None:
         st.markdown("---")
         csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Last', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
+
+# ==========================================
+# DEBUG SECTION (Added to End)
+# ==========================================
+if show_debug:
+    st.title("🐞 JSON Data Inspector")
+    
+    # 1. Select an Aircraft
+    debug_tails = sorted(df['Registration'].unique())
+    selected_debug_tail = st.selectbox("Select Aircraft to Inspect", debug_tails)
+    
+    # 2. Find the ID for this tail
+    c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
+    
+    if c_sess:
+        st.info(f"Searching for aircraft ID for {selected_debug_tail}...")
+        search_res = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft?search={selected_debug_tail}")
+        
+        ac_id = None
+        if search_res:
+            for r in search_res.get('resources', []):
+                title = r.get('title', '')
+                if selected_debug_tail in title:
+                    ac_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
+                    break
+        
+        if ac_id:
+            st.success(f"Found Internal ID: {ac_id}")
+            
+            # 3. FETCH THE HISTORY FOR THIS ID
+            st.subheader(f"Raw Maintenance History for {selected_debug_tail}")
+            st.write("Checking endpoint: `aircraft-maintenance-histories` filtered by this aircraft ID...")
+            
+            # Fetch last 10 history items specifically for this aircraft
+            history_url = f"aircraft-maintenance-histories?perPage=10&orderBy=date&orderByDirection=desc&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=aircraftMaintenanceHistories"
+            raw_history = fetch_resource(c_sess, "https://toran-camo.flightapp.be", history_url)
+            
+            st.json(raw_history)
+        else:
+            st.error(f"Could not find internal ID for {selected_debug_tail}")
