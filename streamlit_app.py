@@ -76,21 +76,28 @@ def fetch_and_merge_data_v2(end_date):
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     # 2. Fetch Bulk Maintenance History
-    hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=500&orderBy=date&orderByDirection=desc")
+    # We grab the first 200 to cover most cases quickly
+    hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
     
     last_maint_map = {}
     if hist_json:
         for r in hist_json.get('resources', []):
             h_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            
+            # Extract Reg
             reg_raw = str(h_fields.get('aircraft') or "Unknown")
             if isinstance(h_fields.get('aircraft'), dict): 
                 reg_raw = h_fields.get('aircraft').get('display', reg_raw)
             reg_merge = normalize_tail(reg_raw.split(' ')[0])
+            
+            # Extract TTSN
             val_raw = h_fields.get('ttsn') or h_fields.get('hours') or h_fields.get('total_time')
             if val_raw:
                 try:
                     val = float(str(val_raw).replace(',', ''))
-                    if reg_merge not in last_maint_map: last_maint_map[reg_merge] = val
+                    # Store only the most recent one (first one found due to sort)
+                    if reg_merge not in last_maint_map:
+                        last_maint_map[reg_merge] = val
                 except: pass
 
     ac_data = []
@@ -106,34 +113,38 @@ def fetch_and_merge_data_v2(end_date):
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
         
-        # --- DETERMINE LAST MAINTENANCE (Updated Safe Search) ---
+        # --- DETERMINE LAST MAINTENANCE (Updated Search Strategy) ---
         last_val = 0.0
         found_baseline = False
         
-        # 1. Check explicit min_hours
+        # 1. Check explicit min_hours in upcoming record
         if fields.get('min_hours'):
             try: 
                 last_val = float(str(fields.get('min_hours')).replace(',', ''))
                 if last_val > 0: found_baseline = True
             except: pass
             
-        # 2. Check Bulk Map
+        # 2. Check the Bulk History Map
         if not found_baseline and reg_merge in last_maint_map:
             last_val = last_maint_map[reg_merge]
             if last_val < due_val: found_baseline = True
 
-        # 3. DEEP SEARCH: Simple Search by Registration
+        # 3. FALLBACK: Simple Search matching user's browser behavior
+        # If we haven't found a valid baseline, search SPECIFICALLY for this tail
         if not found_baseline:
             try:
-                # Use a simple search parameter which is safer than complex relationships
-                deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"aircraft-maintenance-histories?search={reg_display}&perPage=5&orderBy=date&orderByDirection=desc")
+                # This mimics the browser request you showed me
+                search_url = f"aircraft-maintenance-histories?search={reg_display}&perPage=5&orderBy=date&orderByDirection=desc&filters=W10%3D"
+                deep_hist = fetch_resource(c_sess, "https://toran-camo.flightapp.be", search_url)
+                
                 if deep_hist:
                     for dh in deep_hist.get('resources', []):
                         dh_fields = {f['attribute']: f['value'] for f in dh.get('fields', [])}
                         d_val_raw = dh_fields.get('ttsn') or dh_fields.get('hours') or dh_fields.get('total_time')
                         if d_val_raw:
                             d_val = float(str(d_val_raw).replace(',', ''))
-                            if d_val < due_val: 
+                            # We only want a record that is logically "in the past" compared to the next due limit
+                            if d_val < due_val:
                                 last_val = d_val
                                 found_baseline = True
                                 break
@@ -141,9 +152,11 @@ def fetch_and_merge_data_v2(end_date):
 
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
         
+        # Calculate Interval
         if found_baseline:
             interval = due_val - last_val
         else:
+            # Last Resort: Guess interval from name (e.g., "100h" -> 100)
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
             last_val = due_val - interval 
