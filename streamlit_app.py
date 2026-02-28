@@ -235,11 +235,14 @@ def fetch_and_merge_data_v2(end_date):
                             reg = id_map.get(str(f.get('heli_id', '')))
                             if reg: 
                                 book_list.append({
-                                    'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 
-                                    'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 'Planned': dur, 
+                                    'MergeKey': normalize_tail(reg), 
+                                    'Registration': reg, 
+                                    'Start': start, 
+                                    'End': pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None), 
+                                    'Planned': dur, 
                                     'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip(),
-                                    'Instructor': f.get('instructor_name', 'Toran Team')
+                                    # This is the exact working logic that pulls the name correctly!
+                                    'Details': f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
                                 })
                 
                 for b in week_data.get('blockings', []):
@@ -248,7 +251,7 @@ def fetch_and_merge_data_v2(end_date):
                         dur = (pd.to_datetime(b.get('end_datetime')).tz_convert(None) - start).total_seconds() / 3600 * 0.85
                         for h in b.get('helis'):
                             reg = id_map.get(str(h.get('id', '')))
-                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description',''), 'Instructor': '-'})
+                            if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': pd.to_datetime(b.get('end_datetime')).tz_convert(None), 'Planned': dur, 'Type': 'Blocking', 'Details': b.get('description','')})
         except: pass
 
     df_books = pd.DataFrame(book_list)
@@ -408,7 +411,6 @@ if app_mode == "Maintenance Dashboard":
 # MODE 2: GUEST WELCOME SCREEN
 # ==========================================
 elif app_mode == "Guest Welcome Screen":
-    # 1. Inject TV styling, hide sidebar, and set auto-refresh
     st.markdown("""
         <meta http-equiv="refresh" content="300">
         <style>
@@ -436,7 +438,6 @@ elif app_mode == "Guest Welcome Screen":
 
     now_be = pd.Timestamp.now('Europe/Brussels')
 
-    # Header
     head_col1, head_col2 = st.columns([1, 1])
     with head_col1:
         try:
@@ -451,28 +452,24 @@ elif app_mode == "Guest Welcome Screen":
 
     st.markdown("<br><br>", unsafe_allow_html=True)
 
-    # Process Flights for Welcome Screen
     today_flights = pd.DataFrame()
     active_flight = None
 
     if not raw_books_df.empty:
-        # Localize both Start and End times
+        # Convert UTC start/end times directly to Brussels local time so we can perfectly match "today"
         raw_books_df['Local_Start'] = raw_books_df['Start'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         raw_books_df['Local_End'] = raw_books_df['End'].dt.tz_localize('UTC').dt.tz_convert('Europe/Brussels')
         
-        # Filter for ALL Flights Today
         today_flights = raw_books_df[(raw_books_df['Local_Start'].dt.date == now_be.date()) & (raw_books_df['Type'] == 'Flight')].copy()
         
         if not today_flights.empty:
             today_flights = today_flights.sort_values('Local_Start')
             for _, f in today_flights.iterrows():
-                # Find the NEXT chronological flight that has not completely finished yet
-                # (We keep their name on screen until 30 minutes after their flight officially ends)
+                # Keeps the guest name on the big screen until 30 minutes after their flight officially ends
                 if (f['Local_End'] - now_be).total_seconds() >= -1800:
                     active_flight = f
                     break
 
-    # Determine Customer Name Safely
     guest_name = ""
     if active_flight is not None:
         guest_name = str(active_flight['Details']).strip()
@@ -488,7 +485,6 @@ elif app_mode == "Guest Welcome Screen":
                     <h3>🚁 Your Flight Details</h3>
                     <p><b>Time:</b> {active_flight['Local_Start'].strftime('%H:%M')} Local</p>
                     <p><b>Aircraft:</b> {active_flight['Registration']}</p>
-                    <p><b>Instructor:</b> {active_flight['Instructor']}</p>
                 </div>
             """, unsafe_allow_html=True)
         with col2:
@@ -514,15 +510,14 @@ elif app_mode == "Guest Welcome Screen":
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div style="font-size: 30px; font-weight: 800; color: #000000; border-bottom: 4px solid #E4D18C; display: inline-block; margin-bottom: 10px;">TODAY\'S DEPARTURES</div>', unsafe_allow_html=True)
         
-        board_html = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th><th>Instructor</th></tr>'
+        board_html = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th></tr>'
         for _, f in today_flights.iterrows():
             row_class = 'class="active-flight"' if (active_flight is not None and active_flight.equals(f)) else ''
             
-            # Format the board guest name safely
             board_guest = str(f["Details"]).strip()
             if not board_guest or board_guest.lower() in ['nan', 'none']: board_guest = "Guest"
                 
-            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{board_guest}</td><td>{f["Instructor"]}</td></tr>'
+            board_html += f'<tr {row_class}><td>{f["Local_Start"].strftime("%H:%M")}</td><td>{f["Registration"]}</td><td>{board_guest}</td></tr>'
         board_html += '</table>'
         st.markdown(board_html, unsafe_allow_html=True)
     else:
