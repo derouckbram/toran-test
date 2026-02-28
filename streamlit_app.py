@@ -71,11 +71,38 @@ def fetch_and_merge_data_v2(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
 
+    # 1. Fetch Upcoming Maintenance (The Targets)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
+    
+    # 2. Fetch Maintenance History (The Baselines)
+    # We fetch this to find the TTSN of the *last* maintenance to calculate the interval correctly.
+    hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=200&orderBy=date&orderByDirection=desc")
+    
+    last_maint_map = {}
+    if hist_json:
+        for r in hist_json.get('resources', []):
+            h_fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            
+            # Extract Reg
+            reg_raw = str(h_fields.get('aircraft') or "Unknown")
+            if isinstance(h_fields.get('aircraft'), dict): 
+                reg_raw = h_fields.get('aircraft').get('display', reg_raw)
+            reg_merge = normalize_tail(reg_raw.split(' ')[0])
+            
+            # Extract TTSN of this history record
+            # Try common field names for hours in history resources
+            val_raw = h_fields.get('ttsn') or h_fields.get('hours') or h_fields.get('total_time')
+            if val_raw:
+                try:
+                    val = float(str(val_raw).replace(',', ''))
+                    # We store the first one we find because we sorted by date DESC
+                    if reg_merge not in last_maint_map:
+                        last_maint_map[reg_merge] = val
+                except: pass
+
     if not maint_json: return None, "CAMO Data not found", {}, pd.DataFrame(), pd.DataFrame()
 
     ac_data = []
-    aircraft_registry = {}
     
     for r in maint_json.get('resources', []):
         fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
@@ -83,21 +110,41 @@ def fetch_and_merge_data_v2(end_date):
         reg_display = reg_raw.split(' ')[0].strip().upper()
         reg_merge = normalize_tail(reg_display)
 
-        ac_id = None
-        for f in r.get('fields', []):
-            if f.get('attribute') == 'aircraft': ac_id = f.get('belongsToId')
-        if ac_id and reg_merge != "UNKNOWN": aircraft_registry[reg_merge] = ac_id
-
         try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
         except: curr_val = 0.0
         try: due_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
         except: due_val = 0.0
-        potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
+        
+        # Determine the "Last Maintenance" TTSN
+        # Priority 1: Check if 'min_hours' or 'start_hours' exists in the upcoming record
+        last_val = 0.0
+        found_baseline = False
+        
+        if fields.get('min_hours'):
+            try: 
+                last_val = float(str(fields.get('min_hours')).replace(',', ''))
+                found_baseline = True
+            except: pass
+            
+        # Priority 2: Use the history fetch map
+        if not found_baseline and reg_merge in last_maint_map:
+            last_val = last_maint_map[reg_merge]
+            found_baseline = True
 
         maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard Inspection"))
-        try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
-        except: interval = 100.0
+        
+        # Calculate Interval
+        if found_baseline and due_val > last_val:
+            interval = due_val - last_val
+        else:
+            # Fallback to Regex if history is missing or weird
+            try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
+            except: interval = 100.0
+            last_val = due_val - interval # Back-calculate last val for consistency
+        
         if interval <= 0: interval = 100.0 
+
+        potential = max(0.0, due_val - curr_val) if due_val > 0 else 0.0
 
         due_date = None
         raw_date = fields.get('max_valid_until')
@@ -109,7 +156,7 @@ def fetch_and_merge_data_v2(end_date):
 
         ac_data.append({
             'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
-            'Limit': due_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
+            'Limit': due_val, 'Last': last_val, 'Type': maint_type_str, 'Interval': interval, 'Potential': potential, 'Due Date': due_date
         })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -293,11 +340,16 @@ def fetch_and_merge_data_v2(end_date):
 
     df['Forecast'] = df['Potential'] - df['Planned']
     
-    # --- FIXED: Use (Limit - Current) / Interval as requested ---
-    df['Life Now %'] = ((df['Limit'] - df['Current']) / df['Interval']) * 100
+    # --- UPDATED LOGIC: Use Last Known Maintenance TTSN for Interval Calculation ---
+    # Life Now % = (Hours Remaining / (Limit - Last_TTSN)) * 100
+    df['Real_Interval'] = df['Limit'] - df['Last']
+    # Safety: Avoid division by zero
+    df['Real_Interval'] = df['Real_Interval'].apply(lambda x: x if x > 0 else 100.0)
+    
+    df['Life Now %'] = (df['Potential'] / df['Real_Interval']) * 100
     df['Life Now %'] = df['Life Now %'].clip(lower=0, upper=100)
     
-    df['Life Forecast %'] = (df['Forecast'] / df['Interval']) * 100
+    df['Life Forecast %'] = (df['Forecast'] / df['Real_Interval']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].clip(lower=0, upper=100)
     
     return df, df_books, df_defects
@@ -381,7 +433,7 @@ if df is not None:
             col_info, col_bar = st.columns([1, 1])
             with col_info:
                 st.write(f"**🛠️ Next Scheduled Service:** {ac_df['Type']}")
-                st.write(f"**⏱️ Inspection Interval:** {ac_df['Interval']} hours")
+                st.write(f"**⏱️ Interval Calculation:** {ac_df['Limit']:.1f} (Limit) - {ac_df['Last']:.1f} (Last) = {ac_df['Real_Interval']:.1f}h")
                 if pd.notnull(ac_df['Due Date']): st.write(f"**📅 Calendar Due Date:** {ac_df['Due Date'].strftime('%d %b %Y')}")
                 else: st.write("**📅 Calendar Due Date:** No date set")
                 if pd.notnull(ac_df.get('Breach Date')): st.write(f"**🚨 Flight Hours Breach Date:** {ac_df['Breach Date'].strftime('%d %b %Y')}")
@@ -421,5 +473,5 @@ if df is not None:
 
     with st.sidebar:
         st.markdown("---")
-        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
+        csv_data = convert_df_to_csv(df[['Registration', 'Type', 'Current', 'Limit', 'Last', 'Potential', 'Planned', 'Forecast', 'Due Date', 'Breach Date']])
         st.download_button("📥 Download Summary (CSV)", csv_data, f"Fleet_Forecast_{selected_date}.csv", "text/csv", use_container_width=True)
