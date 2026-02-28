@@ -266,17 +266,16 @@ elif app_mode == "Guest Welcome Screen":
         <style>
         [data-testid="collapsedControl"], [data-testid="stSidebar"], header { display: none !important; }
         .welcome-title { font-size: 80px; font-weight: 900; color: #000000; margin-bottom: 5px; }
-        .welcome-subtitle { font-size: 35px; font-weight: 600; color: #666666; margin-bottom: 20px; }
-        .clock-text { font-size: 60px; font-weight: 800; color: #E4D18C; text-align: right; margin-bottom: 10px; }
-        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 25px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.1); }
-        .info-card h3 { font-size: 38px; margin: 0; }
-        .weather-card { background-color: #000000; color: #FFFFFF; padding: 25px; border-radius: 12px; text-align: center; }
-        .weather-temp { font-size: 60px; font-weight: 800; color: #E4D18C; }
+        .welcome-subtitle { font-size: 35px; font-weight: 600; color: #666666; margin-bottom: 40px; }
+        .clock-text { font-size: 55px; font-weight: 800; color: #E4D18C; text-align: right; }
+        .info-card { background-color: #F8F8F8; border-left: 10px solid #E4D18C; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.1); }
+        .info-card h3 { font-size: 40px; margin: 0; }
+        .weather-card { background-color: #000000; color: #FFFFFF; padding: 30px; border-radius: 12px; text-align: center; }
+        .weather-temp { font-size: 65px; font-weight: 800; color: #E4D18C; }
         .flight-board { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 24px; }
         .flight-board th { background-color: #E4D18C; padding: 15px; text-align: left; }
         .flight-board td { padding: 15px; border-bottom: 1px solid #EEE; color: #666; }
         .active-row td { background-color: rgba(228, 209, 140, 0.15) !important; color: #000 !important; font-weight: 800; }
-        .logo-container { text-align: right; margin-top: 10px; }
         </style>
         
         <script>
@@ -291,21 +290,18 @@ elif app_mode == "Guest Welcome Screen":
 
     now_be = pd.Timestamp.now('Europe/Brussels')
     
-    # Grid Layout: 2/3 for Info, 1/3 for Clock & Logo
-    c_main, c_side = st.columns([2, 1])
-
-    with c_side:
-        # Live Clock at the top right
-        st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M:%S")} Local</div>', unsafe_allow_html=True)
-        # Logo directly below clock
+    col_logo, col_clock = st.columns([1, 1])
+    with col_logo:
         try:
             with open("toran_logo.png", "rb") as f:
                 data = base64.b64encode(f.read()).decode()
-            st.markdown(f'<div class="logo-container"><a href="/?mode=admin" target="_self"><img src="data:image/png;base64,{data}" width="350"></a></div>', unsafe_allow_html=True)
-        except: 
-            st.markdown('<div class="logo-container"><a href="/?mode=admin" target="_self" style="text-decoration:none;"><h1 style="color:#000;">TORAN</h1></a></div>', unsafe_allow_html=True)
+            st.markdown(f'<a href="/?mode=admin" target="_self"><img src="data:image/png;base64,{data}" width="350"></a>', unsafe_allow_html=True)
+        except: st.markdown('<a href="/?mode=admin" target="_self" style="text-decoration:none;"><h1 style="color:#000;">TORAN</h1></a>', unsafe_allow_html=True)
+    with col_clock:
+        st.markdown(f'<div id="live-clock" class="clock-text">{now_be.strftime("%H:%M:%S")} Local</div>', unsafe_allow_html=True)
 
-    # Process Flights
+    st.markdown("<br>", unsafe_allow_html=True)
+
     today_flights = pd.DataFrame()
     active_flight = None
     if not raw_books_df.empty:
@@ -317,56 +313,39 @@ elif app_mode == "Guest Welcome Screen":
                 active_flight = f
                 break
 
-    with c_main:
-        if active_flight is not None:
-            guest = str(active_flight['Details']) if str(active_flight['Details']).strip() else "Guest"
-            st.markdown(f'<div class="welcome-title">Welcome, {guest}!</div>', unsafe_allow_html=True)
-            st.markdown('<div class="welcome-subtitle">Your helicopter is prepped and ready</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="welcome-title">Welcome to Toran</div>', unsafe_allow_html=True)
-            st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk</div>', unsafe_allow_html=True)
-
-    # Content Row (Info Card, Weather, and Aircraft Image)
-    st.markdown("<br>", unsafe_allow_html=True)
-    row_info, row_weather, row_img = st.columns([1.1, 0.9, 1])
-
     if active_flight is not None:
-        with row_info:
+        guest = str(active_flight['Details']) if str(active_flight['Details']).strip() else "Guest"
+        st.markdown(f'<div class="welcome-title">Welcome, {guest}!</div>', unsafe_allow_html=True)
+        st.markdown('<div class="welcome-subtitle">We are ready for your departure</div>', unsafe_allow_html=True)
+        
+        c_info, c_img = st.columns([1.2, 1])
+        with c_info:
             st.markdown(f"""
                 <div class="info-card">
-                    <h3>🚁 Flight Info</h3><br>
-                    <p style="font-size:26px; margin:0;"><b>Departs:</b> {active_flight['LStart'].strftime('%H:%M')} Local</p>
-                    <p style="font-size:26px; margin:0;"><b>Aircraft:</b> {active_flight['Registration']}</p>
+                    <h3>🚁 Flight Details</h3><br>
+                    <p style="font-size:28px;"><b>Scheduled:</b> {active_flight['LStart'].strftime('%H:%M')} Local</p>
+                    <p style="font-size:28px;"><b>Aircraft:</b> {active_flight['Registration']}</p>
                 </div>
             """, unsafe_allow_html=True)
-        
-        with row_weather:
+            st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(f"""
                 <div class="weather-card">
-                    <div style="font-size:18px; color:#E4D18C; font-weight:800;">EBKT WEATHER</div>
+                    <div style="font-size:20px; color:#E4D18C; font-weight:800;">EBKT KORTRIJK WEATHER</div>
                     <div class="weather-temp">{weather['temp']}</div>
-                    <div style="font-size:22px;">Wind: {weather['wind']}</div>
+                    <div style="font-size:24px;">Wind: {weather['wind']} at {weather['dir']}</div>
                 </div>
             """, unsafe_allow_html=True)
-            
-        with row_img:
+        with c_img:
             tail_clean = normalize_tail(active_flight['Registration'])
             img_file = AIRCRAFT_DB.get(tail_clean, {}).get('image', 'raven2.jpg')
             try: st.image(img_file, use_container_width=True)
             except: pass
     else:
-        # Fallback view if no active flight
-        with row_info:
-            st.markdown(f"""<div class="info-card"><h3>Toran Fleet</h3><p style="font-size:22px;">Kortrijk-Wevelgem Airport (EBKT)</p></div>""", unsafe_allow_html=True)
-        with row_weather:
-            st.markdown(f"""<div class="weather-card"><div class="weather-temp">{weather['temp']}</div><div>Wind: {weather['wind']}</div></div>""", unsafe_allow_html=True)
-        with row_img:
-            try: st.image("raven2.jpg", use_container_width=True)
-            except: pass
+        st.markdown('<div class="welcome-title">Welcome to Toran Helicopters</div>', unsafe_allow_html=True)
+        st.markdown('<div class="welcome-subtitle">Aviation Excellence in Kortrijk</div>', unsafe_allow_html=True)
 
-    # Table Row
     if not today_flights.empty:
-        st.markdown("<br><h2 style='border-bottom:4px solid #E4D18C; display:inline-block; font-size:32px;'>TODAY'S DEPARTURES</h2>", unsafe_allow_html=True)
+        st.markdown("<br><h2 style='border-bottom:4px solid #E4D18C; display:inline-block;'>TODAY'S DEPARTURES</h2>", unsafe_allow_html=True)
         tbl = '<table class="flight-board"><tr><th>Time</th><th>Aircraft</th><th>Pilot / Student</th></tr>'
         for _, f in today_flights.iterrows():
             cls = 'class="active-row"' if active_flight is not None and active_flight.equals(f) else ''
