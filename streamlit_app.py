@@ -423,7 +423,7 @@ st.markdown("""
 
 # --- UI EXECUTION ---
 with st.sidebar:
-    try: st.image("toran_logo.png", use_container_width=True)
+    try: st.image("Asset 4@4x.jpg", use_container_width=True)
     except FileNotFoundError: pass 
     st.markdown("### Maintenance Center")
     st.write("Go to **pages/welcome_page** for TV Mode")
