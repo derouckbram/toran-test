@@ -96,7 +96,7 @@ def fetch_and_merge_data_master(end_date):
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
-    # 1. UPCOMING MAINTENANCE (The Limit)
+    # 1. UPCOMING MAINTENANCE
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
     ac_data = []
     
@@ -108,7 +108,6 @@ def fetch_and_merge_data_master(end_date):
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
             
-            # --- CRITICAL: Get Internal Aircraft ID for Documents ---
             ac_id_internal = None
             for f_raw in r.get('fields', []):
                 if f_raw.get('attribute') == 'aircraft':
@@ -139,7 +138,7 @@ def fetch_and_merge_data_master(end_date):
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
-    # 2. LAST PERFORMED (History & Hours - Broad Search)
+    # 2. LAST PERFORMED
     hist_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "aircraft-maintenance-histories?perPage=100")
     if hist_json:
         hist_list = []
@@ -154,7 +153,6 @@ def fetch_and_merge_data_master(end_date):
                     try: date_val = pd.to_datetime(fields.get(k)).date(); break
                     except: pass
             
-            # BROAD SPECTRUM SEARCH FOR HOURS
             hist_hours = None
             for k in ['ttsn', 'hours', 'aircraft_hours', 'total_time', 'tacho', 'current_hours', 'aircraft_ttsn']:
                 if fields.get(k):
@@ -279,7 +277,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Precise Logic with ACTIVE CHECK & DEEP DIVE)
+    # 5. DOCUMENTS (Strict ARC/Insurance Only)
     docs_list = []
     debug_log = []
     today_date = pd.Timestamp.now().date()
@@ -304,20 +302,18 @@ def fetch_and_merge_data_master(end_date):
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     
-                    # --- CHECK IS ACTIVE (From Screenshot) ---
-                    # Only process rows where "is_active" (or similar) is True
+                    # --- IS ACTIVE CHECK ---
                     is_active = True
                     for f in r.get('fields', []):
                         attr = str(f.get('attribute', '')).lower()
                         val = f.get('value')
-                        # Check for "is_active", "active", "is_valid"
                         if attr in ['is_active', 'active', 'is_valid']:
                             if val in [False, 0, '0', 'false', 'False', None]:
                                 is_active = False
                                 break
-                    if not is_active: continue # Skip red-crossed rows!
+                    if not is_active: continue 
 
-                    # 1. FIND DOCUMENT TYPE (Priority over Name)
+                    # 1. FIND DOCUMENT TYPE
                     doc_type_val = None
                     for f in r.get('fields', []):
                         if f.get('attribute') in ['document_type', 'type', 'documentType', 'subtype']:
@@ -329,8 +325,9 @@ def fetch_and_merge_data_master(end_date):
                     
                     debug_log.append(f"{ac_key}: {doc_final_name}")
 
-                    # --- CRITICAL FILTER LOGIC ---
-                    is_time_critical = any(kw in doc_final_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension'])
+                    # --- CRITICAL FILTER: ONLY SHOW ARC AND INSURANCE ---
+                    if not any(kw in doc_final_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension']):
+                        continue # SKIP EVERYTHING ELSE
                     
                     # --- DATE HUNTING ---
                     doc_date = None
@@ -346,7 +343,7 @@ def fetch_and_merge_data_master(end_date):
                         except: pass
                         return None
 
-                    # Strategy 1: Look for Keys in LIST View (Added valid_to from screenshot)
+                    # Strategy 1: Look for Keys (valid_to is key!)
                     target_keys = ['valid_to', 'valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
@@ -360,13 +357,10 @@ def fetch_and_merge_data_master(end_date):
                         for val in fields.values():
                             if isinstance(val, str) and (len(val) == 10 or len(val) == 9):
                                 d = parse_date(val)
-                                if d:
-                                    doc_date = d
-                                    break
+                                if d: doc_date = d; break
 
-                    # --- STRATEGY 3: DEEP DIVE (The Fix) ---
-                    # If this is ARC/Insurance AND we still don't have a date, fetch full details
-                    if is_time_critical and not doc_date:
+                    # --- STRATEGY 3: DEEP DIVE ---
+                    if not doc_date:
                         doc_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
                         if doc_id:
                             detail_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"documents/{doc_id}")
@@ -374,24 +368,28 @@ def fetch_and_merge_data_master(end_date):
                                 det_fields = {f['attribute']: f['value'] for f in detail_json['resource'].get('fields', [])}
                                 for k in target_keys:
                                     d = parse_date(det_fields.get(k))
-                                    if d: 
-                                        doc_date = d; break
+                                    if d: doc_date = d; break
                                 if not doc_date:
                                     for val in det_fields.values():
                                         d = parse_date(val)
                                         if d: doc_date = d; break
 
-                    # --- DECISION MATRIX ---
-                    if doc_date and doc_date < (today_date - timedelta(days=60)):
-                        if is_time_critical:
-                            continue # Hide old ARCs/Insurance
-                        else:
-                            doc_date = None # Treat old dates on static docs as "No Expiry"
+                    # Calculate Days Left
+                    days_remaining = (doc_date - today_date).days if doc_date else None
+
+                    # Determine Status Indicator
+                    status_icon = "❓"
+                    if days_remaining is not None:
+                        if days_remaining < 0: status_icon = "🔴" # Expired
+                        elif days_remaining <= 30: status_icon = "🟠" # Warning
+                        else: status_icon = "🟢" # OK
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
                         'Document': doc_final_name, 
-                        'Due Date': doc_date
+                        'Due Date': doc_date,
+                        'Days Left': days_remaining,
+                        'Status': status_icon
                     })
                 
                 if len(current_batch) == 0: break
@@ -512,14 +510,21 @@ if df is not None:
                 else: st.info("✅ No open defects.")
                 
                 st.markdown("---")
-                st.subheader("📂 Aircraft Documents")
+                st.subheader("📂 Aircraft Documents (ARC & Insurance)")
                 if not df_docs.empty:
                     ac_docs = df_docs[df_docs['MergeKey'] == normalize_tail(tail)]
                     if not ac_docs.empty:
-                        st.dataframe(ac_docs[['Document', 'Due Date']], hide_index=True, use_container_width=True, 
-                                     column_config={"Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY")})
+                        st.dataframe(
+                            ac_docs[['Status', 'Document', 'Due Date', 'Days Left']], 
+                            hide_index=True, 
+                            use_container_width=True, 
+                            column_config={
+                                "Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY"),
+                                "Days Left": st.column_config.NumberColumn("Days Left", format="%d")
+                            }
+                        )
                     else:
-                        st.info("No documents found for this aircraft.")
+                        st.info("No active ARC or Insurance documents found.")
                 else:
                     st.info("No documents found.")
                 
