@@ -73,7 +73,6 @@ def get_authenticated_session(base_url, login_path, email, password):
     except: return None
 
 def fetch_resource(session, base_url, resource_name):
-    # Added simple "documents" handling to existing prefix logic logic
     for prefix in ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]:
         try:
             resp = session.get(f"{base_url.rstrip('/')}{prefix}{resource_name}", timeout=10)
@@ -104,9 +103,19 @@ def fetch_and_merge_data_master(end_date):
     if maint_json:
         for r in maint_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            
+            # Extract basic info
             reg_raw = str(fields.get('aircraft') or "Unknown")
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
+            
+            # --- CRITICAL: Get Internal Aircraft ID for Documents ---
+            # We look for the 'belongsToId' in the raw field definition of 'aircraft'
+            ac_id_internal = None
+            for f_raw in r.get('fields', []):
+                if f_raw.get('attribute') == 'aircraft':
+                    ac_id_internal = f_raw.get('belongsToId')
+                    break
 
             try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr_val = 0.0
@@ -127,7 +136,8 @@ def fetch_and_merge_data_master(end_date):
             ac_data.append({
                 'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
-                'Potential': max(0.0, limit_val - curr_val), 'Due Date': due_date
+                'Potential': max(0.0, limit_val - curr_val), 'Due Date': due_date,
+                'AircraftID': ac_id_internal # Storing the ID for Step 5
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -233,7 +243,6 @@ def fetch_and_merge_data_master(end_date):
                     start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
                     
-                    # --- CRITICAL FIX: Only count FUTURE flights ---
                     if start < now: continue  # Skip past flights
                     if start > end_dt: continue # Skip flights past user selection
                     
@@ -285,24 +294,38 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. NEW: RETRIEVE DOCUMENTS (FlightApp)
-    # Using parameters provided via XHR info, slightly increased perPage to ensure we get list
-    docs_query = "?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page=1&viaResource=organisations&viaResourceId=x-pmbk5ezJ&viaRelationship=documents&relationshipType=hasMany"
-    docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"documents{docs_query}")
+    # 5. NEW: RETRIEVE AIRCRAFT SPECIFIC DOCUMENTS
+    # We iterate over the unique aircraft IDs found in Step 1
     docs_list = []
-    
-    if docs_json:
-        for r in docs_json.get('resources', []):
-            fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            # Extract name and dates
-            doc_name = str(fields.get('name') or fields.get('filename') or "Document")
-            doc_date = None
-            for k in ['valid_until', 'expiry_date', 'due_date', 'date']:
-                if fields.get(k):
-                    try: doc_date = pd.to_datetime(fields.get(k)).date(); break
-                    except: pass
+    if 'AircraftID' in df.columns:
+        # Create a map of MergeKey -> AircraftID
+        ac_map = df[['MergeKey', 'AircraftID']].dropna().drop_duplicates().to_dict('records')
+        
+        for ac_record in ac_map:
+            ac_key = ac_record['MergeKey']
+            ac_id = ac_record['AircraftID']
             
-            docs_list.append({'Document': doc_name, 'Due Date': doc_date})
+            # Construct URL for this specific aircraft using the pattern found
+            # viaResource=aircraft, viaResourceId={ac_id}, viaRelationship=documents
+            query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page=1&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
+            
+            docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
+            
+            if docs_json:
+                for r in docs_json.get('resources', []):
+                    fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                    doc_name = str(fields.get('name') or fields.get('filename') or "Document")
+                    doc_date = None
+                    for k in ['valid_until', 'expiry_date', 'due_date', 'date']:
+                        if fields.get(k):
+                            try: doc_date = pd.to_datetime(fields.get(k)).date(); break
+                            except: pass
+                    
+                    docs_list.append({
+                        'MergeKey': ac_key, 
+                        'Document': doc_name, 
+                        'Due Date': doc_date
+                    })
             
     df_docs = pd.DataFrame(docs_list)
     if not df_docs.empty: df_docs = df_docs.sort_values('Due Date', na_position='last')
@@ -333,7 +356,6 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-# Unpack the new 4th return value (df_docs)
 df, raw_books_df, df_defects, df_docs = fetch_and_merge_data_master(selected_date)
 
 st.title("Operations & Maintenance Forecast")
@@ -400,9 +422,7 @@ if df is not None:
 
             with col_prog:
                 st.subheader("📊 Life Status")
-                
                 baseline_txt = f" (Span: {ac_df['IntervalSpan']:.0f}h)"
-                
                 st.write(f"**Life Remaining NOW:**{baseline_txt}")
                 st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}%")
                 
@@ -421,12 +441,17 @@ if df is not None:
                     else: st.info("✅ No open defects.")
                 else: st.info("✅ No open defects.")
                 
-                # --- ADDED: DOCUMENTS SECTION (Under Defects Column) ---
+                # --- UPDATED: AIRCRAFT DOCUMENTS ---
                 st.markdown("---")
-                st.subheader("📂 Organisation Documents")
+                st.subheader("📂 Aircraft Documents")
+                # Filter docs for this specific aircraft
                 if not df_docs.empty:
-                    st.dataframe(df_docs, hide_index=True, use_container_width=True, 
-                                 column_config={"Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY")})
+                    ac_docs = df_docs[df_docs['MergeKey'] == normalize_tail(tail)]
+                    if not ac_docs.empty:
+                        st.dataframe(ac_docs[['Document', 'Due Date']], hide_index=True, use_container_width=True, 
+                                     column_config={"Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY")})
+                    else:
+                        st.info("No documents found for this aircraft.")
                 else:
                     st.info("No documents found.")
 
