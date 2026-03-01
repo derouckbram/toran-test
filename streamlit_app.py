@@ -73,6 +73,7 @@ def get_authenticated_session(base_url, login_path, email, password):
     except: return None
 
 def fetch_resource(session, base_url, resource_name):
+    # Added simple "documents" handling to existing prefix logic logic
     for prefix in ["/admin/nova-api/", "/nova-api/", "/nova-vendor/planning/"]:
         try:
             resp = session.get(f"{base_url.rstrip('/')}{prefix}{resource_name}", timeout=10)
@@ -94,7 +95,7 @@ def fetch_and_merge_data_master(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     # 1. UPCOMING MAINTENANCE (The Limit)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -283,8 +284,30 @@ def fetch_and_merge_data_master(end_date):
     
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
+
+    # 5. NEW: RETRIEVE DOCUMENTS (FlightApp)
+    # Using parameters provided via XHR info, slightly increased perPage to ensure we get list
+    docs_query = "?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page=1&viaResource=organisations&viaResourceId=x-pmbk5ezJ&viaRelationship=documents&relationshipType=hasMany"
+    docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"documents{docs_query}")
+    docs_list = []
     
-    return df, df_books, df_defects
+    if docs_json:
+        for r in docs_json.get('resources', []):
+            fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+            # Extract name and dates
+            doc_name = str(fields.get('name') or fields.get('filename') or "Document")
+            doc_date = None
+            for k in ['valid_until', 'expiry_date', 'due_date', 'date']:
+                if fields.get(k):
+                    try: doc_date = pd.to_datetime(fields.get(k)).date(); break
+                    except: pass
+            
+            docs_list.append({'Document': doc_name, 'Due Date': doc_date})
+            
+    df_docs = pd.DataFrame(docs_list)
+    if not df_docs.empty: df_docs = df_docs.sort_values('Due Date', na_position='last')
+    
+    return df, df_books, df_defects, df_docs
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -310,7 +333,8 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects = fetch_and_merge_data_master(selected_date)
+# Unpack the new 4th return value (df_docs)
+df, raw_books_df, df_defects, df_docs = fetch_and_merge_data_master(selected_date)
 
 st.title("Operations & Maintenance Forecast")
 
@@ -396,6 +420,16 @@ if df is not None:
                     if not ac_def.empty: st.dataframe(ac_def[['ID', 'Type', 'Status', 'Due Date', 'Description']], hide_index=True, use_container_width=True)
                     else: st.info("✅ No open defects.")
                 else: st.info("✅ No open defects.")
+                
+                # --- ADDED: DOCUMENTS SECTION (Under Defects Column) ---
+                st.markdown("---")
+                st.subheader("📂 Organisation Documents")
+                if not df_docs.empty:
+                    st.dataframe(df_docs, hide_index=True, use_container_width=True, 
+                                 column_config={"Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY")})
+                else:
+                    st.info("No documents found.")
+
             with col2:
                 st.subheader("📋 Flight Log")
                 if not raw_books_df.empty:
