@@ -135,7 +135,7 @@ def fetch_and_merge_data_master(end_date):
                 'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
                 'Potential': max(0.0, limit_val - curr_val), 'Due Date': due_date,
-                'AircraftID': ac_id_internal # Added for Docs
+                'AircraftID': ac_id_internal 
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -279,7 +279,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Updated: Look for TYPE, not NAME)
+    # 5. DOCUMENTS (Precise Logic with DEEP DIVE)
     docs_list = []
     debug_log = []
     today_date = pd.Timestamp.now().date()
@@ -311,45 +311,74 @@ def fetch_and_merge_data_master(end_date):
                             doc_type_val = str(f.get('value') or '').strip()
                             break
                     
-                    # Fallback to name if Type is missing, but prefer Type
                     doc_final_name = doc_type_val if doc_type_val else str(fields.get('name') or fields.get('filename') or "Document").strip()
                     doc_final_name_lower = doc_final_name.lower()
                     
                     debug_log.append(f"{ac_key}: {doc_final_name}")
 
                     # --- CRITICAL FILTER LOGIC ---
-                    # We only care about dates for ARC and Insurance (incl typo "Insurrance")
                     is_time_critical = any(kw in doc_final_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension'])
                     
+                    # --- DATE HUNTING ---
                     doc_date = None
-                    # Date Hunting
+                    
+                    # Function to clean and parse date (ISO + European)
+                    def parse_date(val):
+                        if not val or len(str(val)) < 8: return None
+                        val_str = str(val).strip()
+                        # Try ISO
+                        try: return pd.to_datetime(val_str).date()
+                        except: pass
+                        # Try European (DD/MM/YYYY or DD-MM-YYYY)
+                        try: return datetime.strptime(val_str, '%d/%m/%Y').date()
+                        except: pass
+                        try: return datetime.strptime(val_str, '%d-%m-%Y').date()
+                        except: pass
+                        return None
+
+                    # Strategy 1: Look for Keys in LIST View
                     target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
-                        if val:
-                            try: doc_date = pd.to_datetime(val).date(); break
-                            except: pass
+                        d = parse_date(val)
+                        if d: 
+                            doc_date = d
+                            break
                     
-                    # Fallback Vacuum
+                    # Strategy 2: Vacuum in LIST View
                     if not doc_date:
                         for val in fields.values():
-                            if isinstance(val, str) and len(val) == 10:
-                                if re.match(r'\d{4}-\d{2}-\d{2}', val):
-                                    try: doc_date = pd.to_datetime(val).date(); break
-                                    except: pass
+                            if isinstance(val, str) and (len(val) == 10 or len(val) == 9): # catch 1/1/2024 too
+                                d = parse_date(val)
+                                if d:
+                                    doc_date = d
+                                    break
+
+                    # --- STRATEGY 3: DEEP DIVE (The Fix) ---
+                    # If this is ARC/Insurance AND we still don't have a date, fetch full details
+                    if is_time_critical and not doc_date:
+                        doc_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
+                        if doc_id:
+                            # Fetch single resource details
+                            detail_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"documents/{doc_id}")
+                            if detail_json and 'resource' in detail_json:
+                                det_fields = {f['attribute']: f['value'] for f in detail_json['resource'].get('fields', [])}
+                                # Scan the detailed fields
+                                for k in target_keys:
+                                    d = parse_date(det_fields.get(k))
+                                    if d: 
+                                        doc_date = d; break
+                                if not doc_date:
+                                    for val in det_fields.values():
+                                        d = parse_date(val)
+                                        if d: doc_date = d; break
 
                     # --- DECISION MATRIX ---
-                    # 1. If it IS ARC/Insurance:
-                    #    - We TRUST the date. If it's old (>60 days), we hide it (expired/archived).
-                    # 2. If it is NOT ARC/Insurance (e.g. Radio, Noise, Registration):
-                    #    - We IGNORE the date (force it to None). We treat it as Permanent/Valid.
-                    #    - We NEVER hide it based on date.
-                    
                     if doc_date and doc_date < (today_date - timedelta(days=60)):
                         if is_time_critical:
                             continue # Hide old ARCs/Insurance
                         else:
-                            doc_date = None # Treat old dates on static docs as "No Expiry" (Always Show)
+                            doc_date = None # Treat old dates on static docs as "No Expiry"
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
@@ -363,11 +392,8 @@ def fetch_and_merge_data_master(end_date):
             
     df_docs = pd.DataFrame(docs_list)
     if not df_docs.empty:
-        # Sort by Name (Ascending) then Date (Descending) -> Puts newest ARC at top of duplicates
         df_docs = df_docs.sort_values(['Document', 'Due Date'], ascending=[True, False])
-        # Deduplicate: Keep the 'first' (which is the newest due date because of sort above)
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
-        # Final Sort by Date for display (Nulls last)
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
     return df, df_books, df_defects, df_docs, debug_log
