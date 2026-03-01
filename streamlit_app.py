@@ -108,6 +108,7 @@ def fetch_and_merge_data_master(end_date):
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
             
+            # --- CRITICAL: Get Internal Aircraft ID for Documents ---
             ac_id_internal = None
             for f_raw in r.get('fields', []):
                 if f_raw.get('attribute') == 'aircraft':
@@ -325,9 +326,10 @@ def fetch_and_merge_data_master(end_date):
                     
                     debug_log.append(f"{ac_key}: {doc_final_name}")
 
-                    # --- CRITICAL FILTER: ONLY SHOW ARC AND INSURANCE ---
-                    if not any(kw in doc_final_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension']):
-                        continue # SKIP EVERYTHING ELSE
+                    # --- CRITICAL FILTER: ONLY SHOW ARC AND INSURANCE (Exclude "Airworthiness Certificate") ---
+                    # We want 'Review' OR 'ARC' OR 'Insurance'. We do NOT want 'Airworthiness Certificate' (unless it says Review)
+                    if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']):
+                        continue
                     
                     # --- DATE HUNTING ---
                     doc_date = None
