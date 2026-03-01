@@ -279,7 +279,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Updated Logic)
+    # 5. DOCUMENTS (Precise Logic)
     docs_list = []
     debug_log = []
     today_date = pd.Timestamp.now().date()
@@ -306,14 +306,14 @@ def fetch_and_merge_data_master(end_date):
                     doc_name = str(fields.get('name') or fields.get('filename') or "Document").strip()
                     doc_name_lower = doc_name.lower()
                     
-                    # Store for debug
                     debug_log.append(f"{ac_key}: {doc_name}")
 
                     # --- CRITICAL FILTER LOGIC ---
-                    # Is this a document that MUST have a valid due date? (ARC / Insurance / Extensions)
-                    is_time_critical = any(kw in doc_name_lower for kw in ['arc', 'insurance', 'verzekering', 'review', 'extension'])
+                    # WE ONLY CARE ABOUT DATES FOR: ARC, Insurance, Extensions
+                    is_time_critical = any(kw in doc_name_lower for kw in ['airworthiness', 'review', 'arc', 'insurance', 'verzekering', 'extension'])
                     
                     doc_date = None
+                    # Date Hunting
                     target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
@@ -330,17 +330,17 @@ def fetch_and_merge_data_master(end_date):
                                     except: pass
 
                     # --- DECISION MATRIX ---
-                    # 1. If it's Time Critical (ARC/Insurance):
-                    #    - We TRUST the date. If it's old, we hide it (expired).
-                    # 2. If it's NOT Time Critical (Radio, Registration, Noise):
-                    #    - If date is old, we IGNORE the date (treat as Permanent) so it shows up.
-                    #    - We do NOT filter it out based on date.
-
+                    # 1. If it IS ARC/Insurance:
+                    #    - We TRUST the date. If it's old (>60 days), we hide it (expired/archived).
+                    # 2. If it is NOT ARC/Insurance (e.g. Radio, Noise, Registration):
+                    #    - We IGNORE the date. We treat it as Permanent/Valid.
+                    #    - We NEVER hide it based on date.
+                    
                     if doc_date and doc_date < (today_date - timedelta(days=60)):
                         if is_time_critical:
-                            continue # Hide old ARCs
+                            continue # Hide old ARCs/Insurance
                         else:
-                            doc_date = None # Treat old dates on static docs as "No Expiry"
+                            doc_date = None # Treat old dates on static docs as "No Expiry" (Always Show)
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
