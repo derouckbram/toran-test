@@ -279,7 +279,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Vacuum & Filter)
+    # 5. DOCUMENTS (Vacuum, Filter & Pagination)
     docs_list = []
     today_date = pd.Timestamp.now().date()
     
@@ -289,18 +289,25 @@ def fetch_and_merge_data_master(end_date):
             ac_key = ac_record['MergeKey']
             ac_id = ac_record['AircraftID']
             
-            # Increase perPage to ensure we get the latest if older ones exist
-            query = f"documents?search=&filters=W10%3D&orderBy=&perPage=100&trashed=&page=1&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
-            docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
-            
-            if docs_json:
-                for r in docs_json.get('resources', []):
+            # --- PAGINATION LOOP ---
+            page = 1
+            while True:
+                # Iterate pages until no resources are returned
+                query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page={page}&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
+                docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
+                
+                # Check if response is valid and has resources
+                if not docs_json or 'resources' not in docs_json or not docs_json['resources']:
+                    break # Stop loop if no more data
+                
+                current_batch = docs_json['resources']
+                
+                for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     doc_name = str(fields.get('name') or fields.get('filename') or "Document").strip()
                     
                     # --- VACUUM CLEANER FOR DATES ---
                     doc_date = None
-                    # 1. Broad list of keys (English & Dutch)
                     target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
@@ -308,7 +315,6 @@ def fetch_and_merge_data_master(end_date):
                             try: doc_date = pd.to_datetime(val).date(); break
                             except: pass
                     
-                    # 2. If still None, hunt in ALL values for YYYY-MM-DD
                     if not doc_date:
                         for val in fields.values():
                             if isinstance(val, str) and len(val) == 10:
@@ -317,8 +323,6 @@ def fetch_and_merge_data_master(end_date):
                                     except: pass
 
                     # --- LATEST ONLY FILTER ---
-                    # Logic: If a document expired more than 60 days ago, it's likely "archived/inactive".
-                    # We keep future dates + recent expirations (to see what just expired).
                     if doc_date and doc_date < (today_date - timedelta(days=60)):
                         continue
                     
@@ -327,14 +331,19 @@ def fetch_and_merge_data_master(end_date):
                         'Document': doc_name, 
                         'Due Date': doc_date
                     })
+                
+                # If we got fewer results than requested (e.g. 50), this is the last page.
+                # Just in case the server always returns full pages (rare), we rely on the next loop returning empty.
+                if len(current_batch) == 0:
+                    break
+                    
+                page += 1
+                if page > 20: break # Safety break to prevent infinite loops
             
     df_docs = pd.DataFrame(docs_list)
     if not df_docs.empty:
-        # Sort by Name then Date (descending)
         df_docs = df_docs.sort_values(['Document', 'Due Date'], ascending=[True, False])
-        # Deduplicate: Keep the one with the LATEST date for each Document Name
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
-        # Final Sort by Date for display
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
     return df, df_books, df_defects, df_docs
