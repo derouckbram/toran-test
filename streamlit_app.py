@@ -89,12 +89,13 @@ def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 # --- MASTER LOGIC ---
+# Renamed to V3 to force cache invalidation
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_master(end_date):
+def fetch_and_merge_data_v3(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
 
     # 1. UPCOMING MAINTENANCE
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -207,7 +208,7 @@ def fetch_and_merge_data_master(end_date):
             defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': 'Open', 'Description': desc, 'Due Date': d_due})
     df_defects = pd.DataFrame(defects_list)
 
-    # 4. BOOKINGS (UPDATED: Dynamic Future Looking)
+    # 4. BOOKINGS (UPDATED LOGIC: Future Weeks)
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
     
@@ -224,18 +225,19 @@ def fetch_and_merge_data_master(end_date):
     except: pass
 
     now = pd.Timestamp.utcnow().tz_localize(None)
-    
-    # Calculate how many weeks to fetch based on user selection
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59)
+    
+    # CALCULATE WEEKS TO FETCH (Dynamic + Buffer)
     days_diff = (end_dt - now).days
-    weeks_to_fetch = max(1, (days_diff // 7) + 2) # +2 buffer to ensure we cover the full range
+    # e.g. 60 days / 7 = 8 weeks + 5 buffer = 13 weeks scan
+    weeks_to_fetch = max(1, int(days_diff / 7) + 5)
     
     book_list = []
     
-    # Updated Loop: Fetches ALL weeks from now until End Date
     for i in range(weeks_to_fetch): 
         target = now + pd.Timedelta(weeks=i)
         try:
+            # Note: year/week calc handles year boundaries correctly
             resp = t_sess.get(f"https://admin.toran.be/api/planning?week={target.isocalendar()[1]}&year={target.isocalendar()[0]}").json()
             id_map = {str(h['id']): h['title'].upper() for h in resp.get('helis', [])}
             for f in resp.get('entries', []):
@@ -244,7 +246,7 @@ def fetch_and_merge_data_master(end_date):
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
                     
                     if start < now: continue
-                    # Removed upper bound check here so we capture breaches beyond the display window
+                    # We do NOT break here anymore, we capture everything up to weeks_to_fetch
                     
                     reg = id_map.get(str(f.get('heli_id', '')))
                     guest = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
@@ -262,18 +264,19 @@ def fetch_and_merge_data_master(end_date):
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
-        # Drop duplicates in case weeks overlap or API returns duplicates
+        # Drop potential duplicates from overlapping fetches
         df_books = df_books.drop_duplicates(subset=['MergeKey', 'Start'])
         
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         
-        # Calculate Breach Date using ALL future bookings found
+        # Breach date calc (using ALL fetched flights)
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
         
-        # For display in the log table, we still filter to the user's selected date range
+        # Display DF (Only show flights within the user's selected window)
         df_books_display = df_books[df_books['Start'] <= end_dt]
+        
         usage = df_books_display.groupby('MergeKey')['Planned'].sum().reset_index()
         
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
@@ -404,7 +407,7 @@ def fetch_and_merge_data_master(end_date):
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
-    return df, df_books_display, df_defects, df_docs
+    return df, df_books_display, df_defects, df_docs, weeks_to_fetch
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -430,7 +433,10 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs = fetch_and_merge_data_master(selected_date)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v3(selected_date)
+
+with st.sidebar:
+    st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
 
 st.title("Operations & Maintenance Forecast")
 
@@ -488,6 +494,7 @@ if df is not None:
                     color = "red" if days < 14 else "green"
                     st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
                 
+                # --- UPDATED BREACH DISPLAY ---
                 if pd.notnull(ac_df.get('Breach Date')):
                     b_date = ac_df['Breach Date']
                     if b_date <= end_dt_ts:
