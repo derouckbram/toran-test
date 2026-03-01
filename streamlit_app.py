@@ -279,7 +279,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Precise Logic with DEEP DIVE)
+    # 5. DOCUMENTS (Precise Logic with ACTIVE CHECK & DEEP DIVE)
     docs_list = []
     debug_log = []
     today_date = pd.Timestamp.now().date()
@@ -304,6 +304,19 @@ def fetch_and_merge_data_master(end_date):
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     
+                    # --- CHECK IS ACTIVE (From Screenshot) ---
+                    # Only process rows where "is_active" (or similar) is True
+                    is_active = True
+                    for f in r.get('fields', []):
+                        attr = str(f.get('attribute', '')).lower()
+                        val = f.get('value')
+                        # Check for "is_active", "active", "is_valid"
+                        if attr in ['is_active', 'active', 'is_valid']:
+                            if val in [False, 0, '0', 'false', 'False', None]:
+                                is_active = False
+                                break
+                    if not is_active: continue # Skip red-crossed rows!
+
                     # 1. FIND DOCUMENT TYPE (Priority over Name)
                     doc_type_val = None
                     for f in r.get('fields', []):
@@ -322,22 +335,19 @@ def fetch_and_merge_data_master(end_date):
                     # --- DATE HUNTING ---
                     doc_date = None
                     
-                    # Function to clean and parse date (ISO + European)
                     def parse_date(val):
                         if not val or len(str(val)) < 8: return None
                         val_str = str(val).strip()
-                        # Try ISO
                         try: return pd.to_datetime(val_str).date()
                         except: pass
-                        # Try European (DD/MM/YYYY or DD-MM-YYYY)
                         try: return datetime.strptime(val_str, '%d/%m/%Y').date()
                         except: pass
                         try: return datetime.strptime(val_str, '%d-%m-%Y').date()
                         except: pass
                         return None
 
-                    # Strategy 1: Look for Keys in LIST View
-                    target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
+                    # Strategy 1: Look for Keys in LIST View (Added valid_to from screenshot)
+                    target_keys = ['valid_to', 'valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
                         d = parse_date(val)
@@ -348,7 +358,7 @@ def fetch_and_merge_data_master(end_date):
                     # Strategy 2: Vacuum in LIST View
                     if not doc_date:
                         for val in fields.values():
-                            if isinstance(val, str) and (len(val) == 10 or len(val) == 9): # catch 1/1/2024 too
+                            if isinstance(val, str) and (len(val) == 10 or len(val) == 9):
                                 d = parse_date(val)
                                 if d:
                                     doc_date = d
@@ -359,11 +369,9 @@ def fetch_and_merge_data_master(end_date):
                     if is_time_critical and not doc_date:
                         doc_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
                         if doc_id:
-                            # Fetch single resource details
                             detail_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", f"documents/{doc_id}")
                             if detail_json and 'resource' in detail_json:
                                 det_fields = {f['attribute']: f['value'] for f in detail_json['resource'].get('fields', [])}
-                                # Scan the detailed fields
                                 for k in target_keys:
                                     d = parse_date(det_fields.get(k))
                                     if d: 
