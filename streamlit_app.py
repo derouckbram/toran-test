@@ -309,8 +309,8 @@ def fetch_and_merge_data_master(end_date):
                     debug_log.append(f"{ac_key}: {doc_name}")
 
                     # --- CRITICAL FILTER LOGIC ---
-                    # WE ONLY CARE ABOUT DATES FOR: ARC, Insurance, Extensions
-                    is_time_critical = any(kw in doc_name_lower for kw in ['airworthiness', 'review', 'arc', 'insurance', 'verzekering', 'extension'])
+                    # We check specifically for ARC (Airworthiness Review) and Insurance (including "Insurrance")
+                    is_time_critical = any(kw in doc_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension'])
                     
                     doc_date = None
                     # Date Hunting
@@ -333,7 +333,7 @@ def fetch_and_merge_data_master(end_date):
                     # 1. If it IS ARC/Insurance:
                     #    - We TRUST the date. If it's old (>60 days), we hide it (expired/archived).
                     # 2. If it is NOT ARC/Insurance (e.g. Radio, Noise, Registration):
-                    #    - We IGNORE the date. We treat it as Permanent/Valid.
+                    #    - We IGNORE the date (force it to None). We treat it as Permanent/Valid.
                     #    - We NEVER hide it based on date.
                     
                     if doc_date and doc_date < (today_date - timedelta(days=60)):
@@ -354,8 +354,11 @@ def fetch_and_merge_data_master(end_date):
             
     df_docs = pd.DataFrame(docs_list)
     if not df_docs.empty:
+        # Sort by Name (Ascending) then Date (Descending) -> Puts newest ARC at top of duplicates
         df_docs = df_docs.sort_values(['Document', 'Due Date'], ascending=[True, False])
+        # Deduplicate: Keep the 'first' (which is the newest due date because of sort above)
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
+        # Final Sort by Date for display (Nulls last)
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
     return df, df_books, df_defects, df_docs, debug_log
