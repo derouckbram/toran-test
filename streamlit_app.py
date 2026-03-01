@@ -279,7 +279,7 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Precise Logic)
+    # 5. DOCUMENTS (Updated: Look for TYPE, not NAME)
     docs_list = []
     debug_log = []
     today_date = pd.Timestamp.now().date()
@@ -303,14 +303,23 @@ def fetch_and_merge_data_master(end_date):
                 
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-                    doc_name = str(fields.get('name') or fields.get('filename') or "Document").strip()
-                    doc_name_lower = doc_name.lower()
                     
-                    debug_log.append(f"{ac_key}: {doc_name}")
+                    # 1. FIND DOCUMENT TYPE (Priority over Name)
+                    doc_type_val = None
+                    for f in r.get('fields', []):
+                        if f.get('attribute') in ['document_type', 'type', 'documentType', 'subtype']:
+                            doc_type_val = str(f.get('value') or '').strip()
+                            break
+                    
+                    # Fallback to name if Type is missing, but prefer Type
+                    doc_final_name = doc_type_val if doc_type_val else str(fields.get('name') or fields.get('filename') or "Document").strip()
+                    doc_final_name_lower = doc_final_name.lower()
+                    
+                    debug_log.append(f"{ac_key}: {doc_final_name}")
 
                     # --- CRITICAL FILTER LOGIC ---
-                    # We check specifically for ARC (Airworthiness Review) and Insurance (including "Insurrance")
-                    is_time_critical = any(kw in doc_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension'])
+                    # We only care about dates for ARC and Insurance (incl typo "Insurrance")
+                    is_time_critical = any(kw in doc_final_name_lower for kw in ['airworthiness', 'review', 'arc', 'insur', 'verzekering', 'extension'])
                     
                     doc_date = None
                     # Date Hunting
@@ -344,7 +353,7 @@ def fetch_and_merge_data_master(end_date):
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
-                        'Document': doc_name, 
+                        'Document': doc_final_name, 
                         'Due Date': doc_date
                     })
                 
