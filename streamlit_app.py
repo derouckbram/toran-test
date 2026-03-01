@@ -137,7 +137,7 @@ def fetch_and_merge_data_v2(end_date):
             doc_url = f"documents?viaResource=aircraft&viaResourceId={ac_info['id']}&viaRelationship=documents&relationshipType=hasMany&perPage=100&page={page}"
             docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", doc_url)
             
-            # Stop if no data is returned
+            # Stop if no data is returned (End of Pagination)
             if not docs_json or 'resources' not in docs_json or not docs_json['resources']:
                 break 
             
@@ -156,7 +156,7 @@ def fetch_and_merge_data_v2(end_date):
                             is_active = False
                             break
                             
-                # If the document is history, skip it immediately!
+                # If the document is inactive, skip it immediately
                 if not is_active:
                     continue
 
@@ -166,13 +166,14 @@ def fetch_and_merge_data_v2(end_date):
                 
                 due_date = None
                 
-                # --- STRATEGY 1: Keyword Hunt (English & Dutch) ---
+                # --- DATE FINDING STRATEGY 1: Keyword Hunt (English & Dutch) ---
                 target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'validity']
                 
                 for f_item in fields_list:
                     attr = str(f_item.get('attribute', '')).lower()
                     val = str(f_item.get('value', ''))
                     
+                    # Skip Start/Issue dates
                     if any(bad in attr for bad in ['from', 'issue', 'start', 'begin', 'since']):
                         continue
                         
@@ -185,7 +186,7 @@ def fetch_and_merge_data_v2(end_date):
                                     break
                             except: pass
                             
-                # --- STRATEGY 2: Vacuum Cleaner (Scan Values if no Key matched) ---
+                # --- DATE FINDING STRATEGY 2: Vacuum Cleaner (Scan Values if no Key matched) ---
                 if not due_date:
                     for f_item in fields_list:
                         val = str(f_item.get('value', ''))
