@@ -238,7 +238,8 @@ def fetch_and_merge_data_master(end_date):
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
                     
                     if start < now: continue
-                    if start > end_dt: continue
+                    # Removed the "end_dt" break here so we can find breaches FAR in the future if needed
+                    # if start > end_dt: continue 
                     
                     reg = id_map.get(str(f.get('heli_id', '')))
                     guest = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
@@ -260,11 +261,16 @@ def fetch_and_merge_data_master(end_date):
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
-        usage = df_books.groupby('MergeKey')['Planned'].sum().reset_index()
+        
+        # Filter books for display (only show up to selected date), but keep breach calculation valid
+        df_books_display = df_books[df_books['Start'] <= end_dt]
+        usage = df_books_display.groupby('MergeKey')['Planned'].sum().reset_index()
+        
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
         df = df_ac.assign(Planned=0, **{'Breach Date': None})
+        df_books_display = pd.DataFrame()
 
     df['IntervalSpan'] = df['Interval']
     if 'LastHours' in df.columns:
@@ -279,7 +285,6 @@ def fetch_and_merge_data_master(end_date):
 
     # 5. DOCUMENTS (Strict ARC/Insurance Only)
     docs_list = []
-    debug_log = []
     today_date = pd.Timestamp.now().date()
     
     if 'AircraftID' in df.columns:
@@ -288,7 +293,6 @@ def fetch_and_merge_data_master(end_date):
             ac_key = ac_record['MergeKey']
             ac_id = ac_record['AircraftID']
             
-            # --- PAGINATION LOOP ---
             page = 1
             while True:
                 query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page={page}&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
@@ -302,7 +306,6 @@ def fetch_and_merge_data_master(end_date):
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     
-                    # --- IS ACTIVE CHECK ---
                     is_active = True
                     for f in r.get('fields', []):
                         attr = str(f.get('attribute', '')).lower()
@@ -313,7 +316,6 @@ def fetch_and_merge_data_master(end_date):
                                 break
                     if not is_active: continue 
 
-                    # 1. FIND DOCUMENT TYPE
                     doc_type_val = None
                     for f in r.get('fields', []):
                         if f.get('attribute') in ['document_type', 'type', 'documentType', 'subtype']:
@@ -323,13 +325,10 @@ def fetch_and_merge_data_master(end_date):
                     doc_final_name = doc_type_val if doc_type_val else str(fields.get('name') or fields.get('filename') or "Document").strip()
                     doc_final_name_lower = doc_final_name.lower()
                     
-                    debug_log.append(f"{ac_key}: {doc_final_name}")
-
-                    # --- CRITICAL FILTER: ONLY SHOW ARC AND INSURANCE (Exclude "Airworthiness Certificate") ---
+                    # FILTER: ARC/Insurance ONLY
                     if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']):
                         continue
                     
-                    # --- DATE HUNTING ---
                     doc_date = None
                     
                     def parse_date(val):
@@ -343,7 +342,6 @@ def fetch_and_merge_data_master(end_date):
                         except: pass
                         return None
 
-                    # Strategy 1: Look for Keys (valid_to is key!)
                     target_keys = ['valid_to', 'valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
@@ -352,14 +350,13 @@ def fetch_and_merge_data_master(end_date):
                             doc_date = d
                             break
                     
-                    # Strategy 2: Vacuum in LIST View
                     if not doc_date:
                         for val in fields.values():
                             if isinstance(val, str) and (len(val) == 10 or len(val) == 9):
                                 d = parse_date(val)
                                 if d: doc_date = d; break
 
-                    # --- STRATEGY 3: DEEP DIVE ---
+                    # DEEP DIVE
                     if not doc_date:
                         doc_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
                         if doc_id:
@@ -374,15 +371,12 @@ def fetch_and_merge_data_master(end_date):
                                         d = parse_date(val)
                                         if d: doc_date = d; break
 
-                    # Calculate Days Left
                     days_remaining = (doc_date - today_date).days if doc_date else None
-
-                    # Determine Status Indicator
                     status_icon = "❓"
                     if days_remaining is not None:
-                        if days_remaining < 0: status_icon = "🔴" # Expired
-                        elif days_remaining <= 30: status_icon = "🟠" # Warning
-                        else: status_icon = "🟢" # OK
+                        if days_remaining < 0: status_icon = "🔴" 
+                        elif days_remaining <= 30: status_icon = "🟠" 
+                        else: status_icon = "🟢" 
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
@@ -402,7 +396,7 @@ def fetch_and_merge_data_master(end_date):
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
-    return df, df_books, df_defects, df_docs, debug_log
+    return df, df_books_display, df_defects, df_docs
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -426,15 +420,15 @@ with st.sidebar:
     st.markdown("### Maintenance Center")
     st.write("Go to **pages/welcome_page** for TV Mode")
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
-    show_debug = st.checkbox("Show Raw Document List (Debug)")
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, debug_list = fetch_and_merge_data_master(selected_date)
+df, raw_books_df, df_defects, df_docs = fetch_and_merge_data_master(selected_date)
 
 st.title("Operations & Maintenance Forecast")
 
 if df is not None:
     today = pd.Timestamp.now().normalize()
+    end_dt_ts = pd.to_datetime(selected_date)
     
     for _, r in df.iterrows():
         if r['Forecast'] < 0:
@@ -486,10 +480,15 @@ if df is not None:
                     color = "red" if days < 14 else "green"
                     st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
                 
+                # --- UPDATED BREACH DISPLAY ---
                 if pd.notnull(ac_df.get('Breach Date')):
-                    st.write(f"**🚨 Hour Breach Forecast:** :red[{ac_df['Breach Date'].strftime('%d %b %Y')}]")
+                    b_date = ac_df['Breach Date']
+                    if b_date <= end_dt_ts:
+                        st.write(f"**🚨 Hour Breach Forecast:** :red[{b_date.strftime('%d %b %Y')}] (Within Forecast Period)")
+                    else:
+                        st.write(f"**✅ Hour Breach Forecast:** :green[{b_date.strftime('%d %b %Y')}] (After Forecast Period)")
                 else:
-                    st.write(f"**✅ Hour Breach Forecast:** :green[Safe]")
+                    st.write("**✅ Hour Breach Forecast:** No breach forecasted")
 
             with col_prog:
                 st.subheader("📊 Life Status")
@@ -529,10 +528,6 @@ if df is not None:
                         st.info("No active ARC or Insurance documents found.")
                 else:
                     st.info("No documents found.")
-                
-                if show_debug:
-                    st.warning("Debug: Raw Docs Found")
-                    st.write([d for d in debug_list if normalize_tail(tail) in d])
 
             with col2:
                 st.subheader("📋 Flight Log")
