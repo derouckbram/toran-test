@@ -108,7 +108,6 @@ def fetch_and_merge_data_master(end_date):
             reg_display = reg_raw.split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
             
-            # --- CRITICAL: Get Internal Aircraft ID for Documents ---
             ac_id_internal = None
             for f_raw in r.get('fields', []):
                 if f_raw.get('attribute') == 'aircraft':
@@ -327,7 +326,6 @@ def fetch_and_merge_data_master(end_date):
                     debug_log.append(f"{ac_key}: {doc_final_name}")
 
                     # --- CRITICAL FILTER: ONLY SHOW ARC AND INSURANCE (Exclude "Airworthiness Certificate") ---
-                    # We want 'Review' OR 'ARC' OR 'Insurance'. We do NOT want 'Airworthiness Certificate' (unless it says Review)
                     if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']):
                         continue
                     
@@ -489,7 +487,9 @@ if df is not None:
                     st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
                 
                 if pd.notnull(ac_df.get('Breach Date')):
-                    st.error(f"🚨 **BREACH FORECAST:** Aircraft will exceed hours on **{ac_df['Breach Date'].strftime('%d %b %Y')}**")
+                    st.write(f"**🚨 Hour Breach Forecast:** :red[{ac_df['Breach Date'].strftime('%d %b %Y')}]")
+                else:
+                    st.write(f"**✅ Hour Breach Forecast:** :green[Safe]")
 
             with col_prog:
                 st.subheader("📊 Life Status")
