@@ -94,7 +94,7 @@ def fetch_and_merge_data_master(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
-    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
 
     # 1. UPCOMING MAINTENANCE (The Limit)
     maint_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", "upcoming-aircraft-maintenances?perPage=100")
@@ -279,8 +279,9 @@ def fetch_and_merge_data_master(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Vacuum, Filter & Pagination)
+    # 5. DOCUMENTS (Updated Logic)
     docs_list = []
+    debug_log = []
     today_date = pd.Timestamp.now().date()
     
     if 'AircraftID' in df.columns:
@@ -292,21 +293,26 @@ def fetch_and_merge_data_master(end_date):
             # --- PAGINATION LOOP ---
             page = 1
             while True:
-                # Iterate pages until no resources are returned
                 query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page={page}&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
                 docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
                 
-                # Check if response is valid and has resources
                 if not docs_json or 'resources' not in docs_json or not docs_json['resources']:
-                    break # Stop loop if no more data
+                    break
                 
                 current_batch = docs_json['resources']
                 
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     doc_name = str(fields.get('name') or fields.get('filename') or "Document").strip()
+                    doc_name_lower = doc_name.lower()
                     
-                    # --- VACUUM CLEANER FOR DATES ---
+                    # Store for debug
+                    debug_log.append(f"{ac_key}: {doc_name}")
+
+                    # --- CRITICAL FILTER LOGIC ---
+                    # Is this a document that MUST have a valid due date? (ARC / Insurance / Extensions)
+                    is_time_critical = any(kw in doc_name_lower for kw in ['arc', 'insurance', 'verzekering', 'review', 'extension'])
+                    
                     doc_date = None
                     target_keys = ['valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
@@ -315,6 +321,7 @@ def fetch_and_merge_data_master(end_date):
                             try: doc_date = pd.to_datetime(val).date(); break
                             except: pass
                     
+                    # Fallback Vacuum
                     if not doc_date:
                         for val in fields.values():
                             if isinstance(val, str) and len(val) == 10:
@@ -322,9 +329,18 @@ def fetch_and_merge_data_master(end_date):
                                     try: doc_date = pd.to_datetime(val).date(); break
                                     except: pass
 
-                    # --- LATEST ONLY FILTER ---
+                    # --- DECISION MATRIX ---
+                    # 1. If it's Time Critical (ARC/Insurance):
+                    #    - We TRUST the date. If it's old, we hide it (expired).
+                    # 2. If it's NOT Time Critical (Radio, Registration, Noise):
+                    #    - If date is old, we IGNORE the date (treat as Permanent) so it shows up.
+                    #    - We do NOT filter it out based on date.
+
                     if doc_date and doc_date < (today_date - timedelta(days=60)):
-                        continue
+                        if is_time_critical:
+                            continue # Hide old ARCs
+                        else:
+                            doc_date = None # Treat old dates on static docs as "No Expiry"
                     
                     docs_list.append({
                         'MergeKey': ac_key, 
@@ -332,12 +348,9 @@ def fetch_and_merge_data_master(end_date):
                         'Due Date': doc_date
                     })
                 
-                # If we got fewer results than requested (e.g. 50), this is the last page.
-                if len(current_batch) == 0:
-                    break
-                    
+                if len(current_batch) == 0: break
                 page += 1
-                if page > 20: break # Safety break to prevent infinite loops
+                if page > 20: break
             
     df_docs = pd.DataFrame(docs_list)
     if not df_docs.empty:
@@ -345,7 +358,7 @@ def fetch_and_merge_data_master(end_date):
         df_docs = df_docs.drop_duplicates(subset=['MergeKey', 'Document'], keep='first')
         df_docs = df_docs.sort_values('Due Date', na_position='last')
     
-    return df, df_books, df_defects, df_docs
+    return df, df_books, df_defects, df_docs, debug_log
 
 # --- STYLE CSS ---
 st.markdown("""
@@ -369,9 +382,10 @@ with st.sidebar:
     st.markdown("### Maintenance Center")
     st.write("Go to **pages/welcome_page** for TV Mode")
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
+    show_debug = st.checkbox("Show Raw Document List (Debug)")
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs = fetch_and_merge_data_master(selected_date)
+df, raw_books_df, df_defects, df_docs, debug_list = fetch_and_merge_data_master(selected_date)
 
 st.title("Operations & Maintenance Forecast")
 
@@ -462,6 +476,10 @@ if df is not None:
                         st.info("No documents found for this aircraft.")
                 else:
                     st.info("No documents found.")
+                
+                if show_debug:
+                    st.warning("Debug: Raw Docs Found")
+                    st.write([d for d in debug_list if normalize_tail(tail) in d])
 
             with col2:
                 st.subheader("📋 Flight Log")
