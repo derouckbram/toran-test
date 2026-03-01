@@ -229,7 +229,6 @@ def fetch_and_merge_data_v3(end_date):
     
     # CALCULATE WEEKS TO FETCH (Dynamic + Buffer)
     days_diff = (end_dt - now).days
-    # e.g. 60 days / 7 = 8 weeks + 5 buffer = 13 weeks scan
     weeks_to_fetch = max(1, int(days_diff / 7) + 5)
     
     book_list = []
@@ -237,7 +236,6 @@ def fetch_and_merge_data_v3(end_date):
     for i in range(weeks_to_fetch): 
         target = now + pd.Timedelta(weeks=i)
         try:
-            # Note: year/week calc handles year boundaries correctly
             resp = t_sess.get(f"https://admin.toran.be/api/planning?week={target.isocalendar()[1]}&year={target.isocalendar()[0]}").json()
             id_map = {str(h['id']): h['title'].upper() for h in resp.get('helis', [])}
             for f in resp.get('entries', []):
@@ -246,7 +244,6 @@ def fetch_and_merge_data_v3(end_date):
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
                     
                     if start < now: continue
-                    # We do NOT break here anymore, we capture everything up to weeks_to_fetch
                     
                     reg = id_map.get(str(f.get('heli_id', '')))
                     guest = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
@@ -444,12 +441,18 @@ if df is not None:
     today = pd.Timestamp.now().normalize()
     end_dt_ts = pd.to_datetime(selected_date)
     
+    # Global Alerts (Updated: Red if date exceeded, Orange if within 30 days)
     for _, r in df.iterrows():
         if r['Forecast'] < 0:
             msg = f"🛑 **GROUNDING:** {r['Registration']} breach on {r['Breach Date'].strftime('%d %b') if pd.notnull(r.get('Breach Date')) else 'Today'}!"
             st.error(msg, icon="🛑")
-        if r['Due Date'] and (r['Due Date'] - today.date()).days <= 14:
-            st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b')}", icon="📅")
+        
+        if pd.notnull(r['Due Date']):
+            days_left = (r['Due Date'] - today.date()).days
+            if days_left < 0:
+                st.error(f"🛑 **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b %Y')} (EXPIRED!)", icon="🛑")
+            elif days_left <= 30:
+                st.warning(f"⚠️ **CALENDAR:** {r['Registration']} limit {r['Due Date'].strftime('%d %b %Y')} (Due in {days_left} days)", icon="⚠️")
 
     tabs = st.tabs(["Fleet Overview"] + sorted(df['Registration'].tolist()))
     
@@ -491,8 +494,12 @@ if df is not None:
                 
                 if pd.notnull(ac_df['Due Date']):
                     days = (ac_df['Due Date'] - today.date()).days
-                    color = "red" if days < 14 else "green"
-                    st.markdown(f"**Calendar Limit:** :{color}[{ac_df['Due Date'].strftime('%d %b %Y')}] ({days} days left)")
+                    if days < 0:
+                        st.error(f"**Calendar Limit:** {ac_df['Due Date'].strftime('%d %b %Y')} (Expired!)")
+                    elif days <= 30:
+                        st.warning(f"**Calendar Limit:** {ac_df['Due Date'].strftime('%d %b %Y')} ({days} days left)")
+                    else:
+                        st.success(f"**Calendar Limit:** {ac_df['Due Date'].strftime('%d %b %Y')} ({days} days left)")
                 
                 # --- UPDATED BREACH DISPLAY ---
                 if pd.notnull(ac_df.get('Breach Date')):
