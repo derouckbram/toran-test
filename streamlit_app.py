@@ -6,6 +6,7 @@ import urllib.parse
 import re  
 from datetime import datetime, timedelta
 import base64
+import calendar
 
 # --- Page Config ---
 st.set_page_config(page_title="Toran Operations Center", layout="wide", page_icon="🚁")
@@ -32,32 +33,11 @@ def get_ebkt_weather():
 weather = get_ebkt_weather()
 
 # --- Aircraft Image & Cardex Database ---
-# UPDATED: Added Major Overhaul (12Y/2200H) data extracted from Cardex
 AIRCRAFT_DB = {
-    "OOHXP": {
-        "model": "Robinson R44 Raven II", "image": "raven2.jpg", 
-        "seats": "4 Seats", "cruise": "109 kts",
-        "overhaul_install": datetime(2018, 1, 26).date(), # 12Y Start
-        "overhaul_limit_h": 2200 # Hours Limit
-    },
-    "OOMOO": {
-        "model": "Robinson R44 Raven I", "image": "raven1.jpg", 
-        "seats": "4 Seats", "cruise": "109 kts",
-        "overhaul_install": datetime(2019, 10, 2).date(), 
-        "overhaul_limit_h": 2200
-    },
-    "OOTOA": {  # Added TOA based on Cardex
-        "model": "Robinson R44 Raven II", "image": "raven2.jpg", 
-        "seats": "4 Seats", "cruise": "109 kts",
-        "overhaul_install": datetime(2013, 12, 3).date(), 
-        "overhaul_limit_h": 2200
-    },
-    "OOSKH": {
-        "model": "Guimbal Cabri G2", "image": "cabri.jpg", 
-        "seats": "2 Seats", "cruise": "90 kts",
-        "overhaul_install": None, # Fill if available
-        "overhaul_limit_h": 2200
-    }
+    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts", "overhaul_install": datetime(2018, 1, 26).date(), "overhaul_limit_h": 2200},
+    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts", "overhaul_install": datetime(2019, 10, 2).date(), "overhaul_limit_h": 2200},
+    "OOTOA": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts", "overhaul_install": datetime(2013, 12, 3).date(), "overhaul_limit_h": 2200},
+    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts", "overhaul_install": None, "overhaul_limit_h": 2200}
 }
 
 # --- Style Engine ---
@@ -75,21 +55,9 @@ def apply_toran_style():
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; }
         
-        /* Custom Progress Bar Styles */
-        .toran-progress-container {
-            width: 100%;
-            background-color: #f0f0f0;
-            border-radius: 4px;
-            height: 20px;
-            display: flex;
-            overflow: hidden;
-            margin-bottom: 5px;
-            border: 1px solid #e0e0e0;
-        }
+        .toran-progress-container { width: 100%; background-color: #f0f0f0; border-radius: 4px; height: 20px; display: flex; overflow: hidden; margin-bottom: 5px; border: 1px solid #e0e0e0; }
         .toran-bar-normal { background-color: #E4D18C; height: 100%; transition: width 0.5s ease-in-out; }
         .toran-bar-tol { background-color: #FF8C00; height: 100%; transition: width 0.5s ease-in-out; }
-        
-        /* Overhaul Bar Styles (Darker/Different) */
         .oh-bar-container { width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 12px; overflow: hidden; margin-top: 2px; }
         .oh-bar-fill { background-color: #666666; height: 100%; }
         </style>
@@ -128,36 +96,93 @@ def normalize_tail(tail):
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
-# --- CUSTOM PROGRESS BAR RENDERER ---
 def render_progress_bar(normal_rem, tol_rem, interval):
     if interval <= 0: interval = 100 
     pct_normal = max(0.0, min(100.0, (normal_rem / interval) * 100))
     pct_tol = max(0.0, min(100.0, (tol_rem / interval) * 100))
-    
-    html = f"""
-    <div class="toran-progress-container" title="Normal: {normal_rem:.1f} | Tolerance: {tol_rem:.1f}">
-        <div class="toran-bar-normal" style="width: {pct_normal}%;"></div>
-        <div class="toran-bar-tol" style="width: {pct_tol}%;"></div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(f"""<div class="toran-progress-container" title="Normal: {normal_rem:.1f} | Tolerance: {tol_rem:.1f}"><div class="toran-bar-normal" style="width: {pct_normal}%;"></div><div class="toran-bar-tol" style="width: {pct_tol}%;"></div></div>""", unsafe_allow_html=True)
 
 def render_overhaul_bar(current, limit, label):
     if limit <= 0: return
     pct = min(100.0, (current / limit) * 100)
     rem_pct = 100.0 - pct
+    st.markdown(f"""<div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left)</div><div class="oh-bar-container"><div class="oh-bar-fill" style="width: {pct}%;"></div></div>""", unsafe_allow_html=True)
+
+# --- HEAVY CACHE: HISTORICAL DATA ---
+# This runs ONCE every 24 hours (86400 seconds)
+@st.cache_data(ttl=86400, show_spinner="Downloading full flight history (One-time)...")
+def fetch_historical_rates():
+    # We need a fresh session here since we can't pickle the session object easily in cache
+    f_sess = get_authenticated_session("https://toran.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
+    if not f_sess: return {}, {}
+
+    raw_hist = []
+    page = 1
     
-    html = f"""
-    <div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left)</div>
-    <div class="oh-bar-container">
-        <div class="oh-bar-fill" style="width: {pct}%;"></div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    # Loop until we have everything or hit a safety limit (e.g. 50 pages = 2500 flights)
+    # Adjust 50 to higher if you have more flights
+    while True:
+        try:
+            h_flights = fetch_resource(f_sess, "https://toran.flightapp.be", f"flights?perPage=50&page={page}")
+            if not h_flights or 'resources' not in h_flights or not h_flights['resources']:
+                break
+            
+            for r in h_flights['resources']:
+                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                reg = str(fields.get('aircraft') or "Unk").split(' ')[0]
+                
+                duration = 0.0
+                raw_dur = fields.get('flight_time') or fields.get('total_time') or fields.get('block_time')
+                if raw_dur:
+                    if isinstance(raw_dur, str) and ':' in raw_dur:
+                        h, m = map(int, raw_dur.split(':'))
+                        duration = h + (m/60)
+                    else:
+                        try: duration = float(raw_dur) / 60
+                        except: pass
+                
+                f_date = None
+                if fields.get('date'): 
+                    try: f_date = pd.to_datetime(fields.get('date')).date()
+                    except: pass
+                
+                if f_date and duration > 0:
+                    raw_hist.append({'Reg': normalize_tail(reg), 'Date': f_date, 'Month': f_date.month, 'Hours': duration})
+            
+            page += 1
+            if page > 100: break # Safety break at ~5000 flights
+        except: break
+
+    # Process Rates
+    seasonal_rates = {}
+    global_rates = {}
+    
+    if raw_hist:
+        df_hist = pd.DataFrame(raw_hist)
+        for reg, group in df_hist.groupby('Reg'):
+            # Global Average
+            min_date = group['Date'].min()
+            max_date = group['Date'].max()
+            days = (max_date - min_date).days
+            if days < 1: days = 1
+            global_rates[reg] = group['Hours'].sum() / days
+            
+            # Seasonal (Monthly)
+            seasonal_rates[reg] = {}
+            for month_idx, month_group in group.groupby('Month'):
+                total_h = month_group['Hours'].sum()
+                # Estimate: Total Hours / (Years of data * 30.4 days)
+                # Count unique YYYY-MM periods to find how many "Julys" we have
+                unique_periods = month_group['Date'].apply(lambda x: x.strftime('%Y-%m')).nunique()
+                if unique_periods < 1: unique_periods = 1
+                denom = unique_periods * 30.4
+                seasonal_rates[reg][month_idx] = total_h / denom
+                
+    return seasonal_rates, global_rates
 
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v7(end_date):
+def fetch_and_merge_data_v10(end_date, seasonal_rates, global_rates):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -170,23 +195,17 @@ def fetch_and_merge_data_v7(end_date):
     if maint_json:
         for r in maint_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            
-            reg_raw = str(fields.get('aircraft') or "Unknown")
-            reg_display = reg_raw.split(' ')[0].strip().upper()
+            reg_display = str(fields.get('aircraft') or "Unknown").split(' ')[0].strip().upper()
             reg_merge = normalize_tail(reg_display)
-            
             ac_id_internal = None
             for f_raw in r.get('fields', []):
                 if f_raw.get('attribute') == 'aircraft':
-                    ac_id_internal = f_raw.get('belongsToId')
-                    break
+                    ac_id_internal = f_raw.get('belongsToId'); break
 
             try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr_val = 0.0
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
-            
-            # --- HOURS EXCEEDANCE ---
             try: exceedance = float(str(fields.get('max_hours_exceedence', 0)).replace(',', ''))
             except: exceedance = 0.0
             
@@ -198,30 +217,21 @@ def fetch_and_merge_data_v7(end_date):
             except: interval = 100.0
             if interval <= 0: interval = 100.0 
 
-            # --- CALENDAR EXCEEDANCE & DUE DATE ---
-            try:
-                cal_exc_raw = str(fields.get('max_valid_until_exceedence', 0))
-                cal_exc_days = float(cal_exc_raw.replace(',', ''))
-            except:
-                cal_exc_days = 0.0
+            try: cal_exc_days = float(str(fields.get('max_valid_until_exceedence', 0)).replace(',', ''))
+            except: cal_exc_days = 0.0
 
             due_date = None
             raw_date = fields.get('max_valid_until')
             if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
                 try: 
                     d_obj = pd.to_datetime(str(raw_date))
-                    if cal_exc_days > 0:
-                        d_obj = d_obj + timedelta(days=int(cal_exc_days))
+                    if cal_exc_days > 0: d_obj = d_obj + timedelta(days=int(cal_exc_days))
                     due_date = d_obj.date()
                 except: pass
 
             ac_data.append({
-                'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
-                'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
-                'Potential': final_potential, 'Due Date': due_date,
-                'AircraftID': ac_id_internal,
-                'Exceedance': exceedance,
-                'CalExceedance': cal_exc_days
+                'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 'Limit': limit_val, 'Type': maint_type_str, 
+                'Interval': interval, 'Potential': final_potential, 'Due Date': due_date, 'AircraftID': ac_id_internal, 'Exceedance': exceedance, 'CalExceedance': cal_exc_days
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -231,41 +241,29 @@ def fetch_and_merge_data_v7(end_date):
         hist_list = []
         for r in hist_json.get('resources', []):
             fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-            reg_raw = str(fields.get('aircraft') or "")
-            reg_merge = normalize_tail(reg_raw.split(' ')[0])
-            
+            reg_merge = normalize_tail(str(fields.get('aircraft') or "").split(' ')[0])
             date_val = None
             for k in ['date', 'completion_date', 'performed_at']:
-                if fields.get(k):
+                if fields.get(k): 
                     try: date_val = pd.to_datetime(fields.get(k)).date(); break
                     except: pass
-            
             hist_hours = None
             for k in ['ttsn', 'hours', 'aircraft_hours', 'total_time', 'tacho', 'current_hours', 'aircraft_ttsn']:
-                if fields.get(k):
+                if fields.get(k): 
                     try: 
                         val = float(str(fields.get(k)).replace(',', ''))
-                        if 100 < val < 20000: # Sanity check
-                            hist_hours = val
-                            break
+                        if 100 < val < 20000: hist_hours = val; break
                     except: pass
-            
             if hist_hours is None:
                 for k, v in fields.items():
                     if isinstance(v, (str, int, float)):
                         try:
-                            val_str = str(v).replace(',', '')
-                            if re.match(r'^\d+(\.\d{1,2})?$', val_str):
-                                val = float(val_str)
-                                if 500 < val < 15000:
-                                    hist_hours = val
-                                    break
+                            val = float(str(v).replace(',', ''))
+                            if 500 < val < 15000: hist_hours = val; break
                         except: pass
-
             m_type = str(fields.get('type') or fields.get('name') or "Maintenance")
             if reg_merge != "UNKNOWN" and date_val:
                 hist_list.append({'MergeKey': reg_merge, 'LastDate': date_val, 'LastType': m_type, 'LastHours': hist_hours})
-        
         if hist_list:
             df_hist = pd.DataFrame(hist_list).sort_values('LastDate', ascending=False).drop_duplicates('MergeKey')
             df_ac = pd.merge(df_ac, df_hist, on='MergeKey', how='left')
@@ -303,7 +301,6 @@ def fetch_and_merge_data_v7(end_date):
         c_resp = t_sess.get("https://admin.toran.be/api/customers", timeout=10).json()
         for c in c_resp.get('data', c_resp): cust_map[str(c.get('id'))] = f"{c.get('first_name', '')} {c.get('last_name', '')}".strip()
     except: pass
-
     pilot_map = {}
     try:
         p_resp = t_sess.get("https://admin.toran.be/api/pilots?page_size=100", timeout=10).json()
@@ -343,11 +340,47 @@ def fetch_and_merge_data_v7(end_date):
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
+        
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
+        
         df_books_display = df_books[df_books['Start'] <= end_dt]
         usage = df_books_display.groupby('MergeKey')['Planned'].sum().reset_index()
+        
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
+        
+        # --- PROJECTED BREACH CALCULATION (SEASONAL) ---
+        last_booking = df_books.groupby('MergeKey')['Start'].max().reset_index().rename(columns={'Start': 'LastBookDate'})
+        df = pd.merge(df, last_booking, on='MergeKey', how='left')
+        
+        for idx, row in df.iterrows():
+            if pd.isnull(row.get('Breach Date')): # Only if no hard breach confirmed
+                reg_key = row['MergeKey']
+                remaining = row['Potential'] - row['Planned']
+                
+                # Check if we have rates for this aircraft
+                fallback_rate = global_rates.get(reg_key, 0)
+                
+                if remaining > 0 and fallback_rate > 0:
+                    sim_date = row['LastBookDate'] if pd.notnull(row.get('LastBookDate')) else now
+                    days_counter = 0
+                    
+                    while remaining > 0 and days_counter < (365 * 5):
+                        sim_date += timedelta(days=1)
+                        days_counter += 1
+                        
+                        month = sim_date.month
+                        daily_consumption = 0
+                        if reg_key in seasonal_rates and month in seasonal_rates[reg_key]:
+                            daily_consumption = seasonal_rates[reg_key][month]
+                        else:
+                            daily_consumption = fallback_rate
+                        
+                        if daily_consumption <= 0: daily_consumption = 0.1
+                        remaining -= daily_consumption
+                    
+                    df.at[idx, 'Breach Date'] = sim_date
+                    df.at[idx, 'Is_Projected'] = True
     else:
         df = df_ac.assign(Planned=0, **{'Breach Date': None})
         df_books_display = pd.DataFrame()
@@ -358,6 +391,7 @@ def fetch_and_merge_data_v7(end_date):
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
+    
     df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
     df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
@@ -456,10 +490,18 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v7(selected_date)
+# 1. Fetch History Rates (Cached for 24h)
+seasonal_rates, global_rates = fetch_historical_rates()
+
+# 2. Fetch Live Data (Cached for 5m)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v10(selected_date, seasonal_rates, global_rates)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
+    if global_rates:
+        st.caption("Daily Flight Rates (Hist):")
+        for k, v in global_rates.items():
+            st.caption(f"{k}: {v:.2f} h/day")
 
 st.title("Operations & Maintenance Forecast")
 
@@ -527,32 +569,38 @@ if df is not None:
                 
                 if pd.notnull(ac_df.get('Breach Date')):
                     b_date = ac_df['Breach Date']
-                    if b_date <= end_dt_ts:
-                        st.write(f"**🚨 Hour Breach Forecast:** :red[{b_date.strftime('%d %b %Y')}] (Within Forecast Period)")
+                    is_proj = ac_df.get('Is_Projected', False)
+                    date_str = b_date.strftime('%d %b %Y')
+                    
+                    if is_proj:
+                        st.info(f"**ℹ️ Projected Breach (Based on History):** {date_str}")
+                    elif b_date <= end_dt_ts:
+                        st.write(f"**🚨 Hour Breach Forecast:** :red[{date_str}] (Within Forecast Period)")
                     else:
-                        st.write(f"**✅ Hour Breach Forecast:** :green[{b_date.strftime('%d %b %Y')}] (After Forecast Period)")
+                        st.write(f"**✅ Hour Breach Forecast:** :green[{date_str}] (After Forecast Period)")
                 else:
                     st.write("**✅ Hour Breach Forecast:** No breach forecasted")
 
             with col_prog:
                 st.subheader("📊 Life Status")
                 
-                # --- Next Inspection (Normal + Tolerance) ---
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
+                
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
+                
                 st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
                 render_progress_bar(normal_rem, tol_rem, interval)
                 
                 forecast_total = ac_df['Forecast']
                 forecast_normal = max(0.0, forecast_total - exceedance)
                 forecast_tol = min(exceedance, forecast_total)
+                
                 st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):** (Total: {forecast_total:.1f}h)")
                 render_progress_bar(forecast_normal, forecast_tol, interval)
                 
-                # --- CALENDAR BAR ---
                 if pd.notnull(ac_df['Due Date']):
                     cal_due = ac_df['Due Date']
                     cal_tol = ac_df.get('CalExceedance', 0.0)
@@ -569,18 +617,13 @@ if df is not None:
                     else:
                         st.error("**Calendar Life Expired**")
 
-                # --- MAJOR OVERHAUL TRACKER (Extracted from Cardex) ---
                 st.markdown("---")
                 st.write("**🏗️ Major Overhaul Tracker (2200h / 12Y)**")
-                
                 ac_meta = AIRCRAFT_DB.get(normalize_tail(tail))
                 if ac_meta:
-                    # 1. 2200h Bar
                     oh_limit_h = ac_meta.get('overhaul_limit_h', 2200)
                     oh_current = ac_df['Current']
                     render_overhaul_bar(oh_current, oh_limit_h, "Airframe Hours")
-                    
-                    # 2. 12Y Bar
                     install_date = ac_meta.get('overhaul_install')
                     if install_date:
                         due_12y = install_date + timedelta(days=365*12)
