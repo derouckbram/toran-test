@@ -125,11 +125,11 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     st.markdown(html, unsafe_allow_html=True)
 
 # --- MASTER LOGIC ---
-# Renamed to V6 to force cache invalidation
 @st.cache_data(ttl=300)
 def fetch_and_merge_data_v6(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
-    t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL", st.secrets["TORAN_PASS"]])
+    # FIXED SYNTAX HERE: Added closing bracket after TORAN_EMAIL
+    t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
 
@@ -509,7 +509,6 @@ if df is not None:
             with col_prog:
                 st.subheader("📊 Life Status")
                 
-                # Hours Bar
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
@@ -550,7 +549,6 @@ if df is not None:
                         st.error("**Calendar Life Expired**")
 
                 
-                # Forecast Hours Bar
                 forecast_total = ac_df['Forecast']
                 forecast_normal = max(0.0, forecast_total - exceedance)
                 forecast_tol = min(exceedance, forecast_total)
