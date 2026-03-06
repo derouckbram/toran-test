@@ -102,11 +102,14 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     pct_tol = max(0.0, min(100.0, (tol_rem / interval) * 100))
     st.markdown(f"""<div class="toran-progress-container" title="Normal: {normal_rem:.1f} | Tolerance: {tol_rem:.1f}"><div class="toran-bar-normal" style="width: {pct_normal}%;"></div><div class="toran-bar-tol" style="width: {pct_tol}%;"></div></div>""", unsafe_allow_html=True)
 
-def render_overhaul_bar(current, limit, label):
+def render_overhaul_bar(current, limit, label, forecast_str=""):
     if limit <= 0: return
     pct = min(100.0, (current / limit) * 100)
     rem_pct = 100.0 - pct
-    st.markdown(f"""<div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left)</div><div class="oh-bar-container"><div class="oh-bar-fill" style="width: {pct}%;"></div></div>""", unsafe_allow_html=True)
+    
+    extra_info = f" | {forecast_str}" if forecast_str else ""
+    
+    st.markdown(f"""<div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left{extra_info})</div><div class="oh-bar-container"><div class="oh-bar-fill" style="width: {pct}%;"></div></div>""", unsafe_allow_html=True)
 
 # --- VISUAL DOWNLOADER LOGIC ---
 def get_historical_rates_interactive():
@@ -184,7 +187,7 @@ def get_historical_rates_interactive():
 
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v12(end_date, seasonal_rates, global_rates):
+def fetch_and_merge_data_v13(end_date, seasonal_rates, global_rates):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -230,10 +233,24 @@ def fetch_and_merge_data_v12(end_date, seasonal_rates, global_rates):
                     if cal_exc_days > 0: d_obj = d_obj + timedelta(days=int(cal_exc_days))
                     due_date = d_obj.date()
                 except: pass
+            
+            # --- OVERHAUL FORECAST (2200h) ---
+            # Using Global Rate for long-term projection
+            oh_forecast_date = None
+            ac_meta = AIRCRAFT_DB.get(reg_merge)
+            if ac_meta:
+                oh_limit = ac_meta.get('overhaul_limit_h', 2200)
+                rem_oh = oh_limit - curr_val
+                avg_rate = global_rates.get(reg_merge, 0)
+                if rem_oh > 0 and avg_rate > 0:
+                    days_to_oh = rem_oh / avg_rate
+                    oh_forecast_date = datetime.now().date() + timedelta(days=int(days_to_oh))
 
             ac_data.append({
                 'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 'Limit': limit_val, 'Type': maint_type_str, 
-                'Interval': interval, 'Potential': final_potential, 'Due Date': due_date, 'AircraftID': ac_id_internal, 'Exceedance': exceedance, 'CalExceedance': cal_exc_days
+                'Interval': interval, 'Potential': final_potential, 'Due Date': due_date, 'AircraftID': ac_id_internal, 
+                'Exceedance': exceedance, 'CalExceedance': cal_exc_days,
+                'OH_Forecast': oh_forecast_date # Store for UI
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -384,7 +401,6 @@ def fetch_and_merge_data_v12(end_date, seasonal_rates, global_rates):
     df['IntervalSpan'] = df['Interval']
     if 'LastHours' in df.columns:
         mask = df['LastHours'].notna() & (df['Limit'] > df['LastHours'])
-        # Updated Logic: Use accurate interval span for progress bar calculation
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
@@ -488,7 +504,7 @@ with st.sidebar:
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.session_state.clear(); st.rerun()
 
 seasonal_rates, global_rates = get_historical_rates_interactive()
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v12(selected_date, seasonal_rates, global_rates)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v13(selected_date, seasonal_rates, global_rates)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -579,7 +595,7 @@ if df is not None:
                 
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
-                interval = ac_df['IntervalSpan'] # Use calculated span, not raw interval
+                interval = ac_df['IntervalSpan'] 
                 
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
@@ -614,7 +630,15 @@ if df is not None:
                 if ac_meta:
                     oh_limit_h = ac_meta.get('overhaul_limit_h', 2200)
                     oh_current = ac_df['Current']
-                    render_overhaul_bar(oh_current, oh_limit_h, "Airframe Hours")
+                    
+                    # --- NEW: Overhaul Projection Date ---
+                    oh_proj_str = ""
+                    oh_forecast = ac_df.get('OH_Forecast')
+                    if oh_forecast:
+                        oh_proj_str = f"Projected: {oh_forecast.strftime('%d %b %Y')}"
+                    
+                    render_overhaul_bar(oh_current, oh_limit_h, "Airframe Hours", oh_proj_str)
+                    
                     install_date = ac_meta.get('overhaul_install')
                     if install_date:
                         due_12y = install_date + timedelta(days=365*12)
