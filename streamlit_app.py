@@ -112,13 +112,10 @@ def convert_df_to_csv(df):
 
 # --- CUSTOM PROGRESS BAR RENDERER ---
 def render_progress_bar(normal_rem, tol_rem, interval):
-    if interval <= 0: interval = 100 # Avoid division by zero
-    
-    # Calculate percentages relative to the INTERVAL
+    if interval <= 0: interval = 100 
     pct_normal = max(0.0, min(100.0, (normal_rem / interval) * 100))
     pct_tol = max(0.0, min(100.0, (tol_rem / interval) * 100))
     
-    # Create HTML structure
     html = f"""
     <div class="toran-progress-container" title="Normal: {normal_rem:.1f}h | Tolerance: {tol_rem:.1f}h">
         <div class="toran-bar-normal" style="width: {pct_normal}%;"></div>
@@ -158,7 +155,7 @@ def fetch_and_merge_data_v4(end_date):
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
-            # --- EXCEEDANCE (TOLERANCE) ---
+            # --- EXCEEDANCE ---
             try: exceedance = float(str(fields.get('max_hours_exceedence', 0)).replace(',', ''))
             except: exceedance = 0.0
             
@@ -181,7 +178,7 @@ def fetch_and_merge_data_v4(end_date):
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
                 'Potential': final_potential, 'Due Date': due_date,
                 'AircraftID': ac_id_internal,
-                'Exceedance': exceedance # Stored for UI Logic
+                'Exceedance': exceedance
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -316,7 +313,14 @@ def fetch_and_merge_data_v4(end_date):
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
-    # Life Now calculation moved to UI section to handle splits
+    
+    # --- RESTORED: Standard Percentage Calculation for Fleet Summary Table ---
+    # This ensures the standard progress bars in the main table still work
+    df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
+    df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
+    
+    df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
+    df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
     # 5. DOCUMENTS
     docs_list = []
@@ -437,10 +441,12 @@ if df is not None:
     
     with tabs[0]:
         st.subheader("Fleet Summary")
-        cols = ['Registration', 'Type', 'Current', 'Potential', 'Planned', 'Forecast', 'Due Date']
+        cols = ['Registration', 'Type', 'Current', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']
         if 'LastDate' in df.columns: cols.extend(['LastDate', 'LastType', 'LastHours'])
         st.dataframe(df[cols], 
                      column_config={
+                         "Life Now %": st.column_config.ProgressColumn("Life Remaining", format="%.0f%%", min_value=0, max_value=100),
+                         "Life Forecast %": st.column_config.ProgressColumn("Life at Forecast", format="%.0f%%", min_value=0, max_value=100),
                          "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
                          "LastDate": st.column_config.DateColumn("Last Performed", format="DD MMM YYYY"),
                          "LastHours": st.column_config.NumberColumn("Last TSN", format="%.1f h")
@@ -490,24 +496,18 @@ if df is not None:
             with col_prog:
                 st.subheader("📊 Life Status")
                 
-                # --- CALCULATE BAR SPLITS (NORMAL vs TOLERANCE) ---
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
                 
-                # Normal Remaining: Everything except the tolerance portion
-                # Note: Potential already includes Exceedance.
-                # If Potential > Exceedance, we have Normal time + full tolerance.
-                # If Potential <= Exceedance, we are flying ON tolerance (Normal is 0).
-                
+                # Normal Remaining = Total Potential - Exceedance
                 normal_rem = max(0.0, total_potential - exceedance)
-                # Tol rem is just the remainder up to the exceedance limit
+                # Tolerance Remaining = Remainder (either part or full exceedance)
                 tol_rem = min(exceedance, total_potential)
                 
                 st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
                 render_progress_bar(normal_rem, tol_rem, interval)
                 
-                # Forecast Calculation
                 forecast_total = ac_df['Forecast']
                 forecast_normal = max(0.0, forecast_total - exceedance)
                 forecast_tol = min(exceedance, forecast_total)
