@@ -89,7 +89,6 @@ def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 # --- MASTER LOGIC ---
-# Renamed to V3 to force cache invalidation
 @st.cache_data(ttl=300)
 def fetch_and_merge_data_v3(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
@@ -115,11 +114,21 @@ def fetch_and_merge_data_v3(end_date):
                     ac_id_internal = f_raw.get('belongsToId')
                     break
 
+            # Current & Limit
             try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr_val = 0.0
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
+            # --- NEW: EXCEEDANCE HANDLING ---
+            try: exceedance = float(str(fields.get('max_hours_exceedence', 0)).replace(',', ''))
+            except: exceedance = 0.0
+            
+            # Calculate Base Potential
+            base_potential = limit_val - curr_val
+            # Add tolerance if available
+            final_potential = max(0.0, base_potential + exceedance)
+
             maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard"))
             try: interval = float(re.search(r'(\d+)', maint_type_str).group(1))
             except: interval = 100.0
@@ -134,7 +143,7 @@ def fetch_and_merge_data_v3(end_date):
             ac_data.append({
                 'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
-                'Potential': max(0.0, limit_val - curr_val), 'Due Date': due_date,
+                'Potential': final_potential, 'Due Date': due_date, # Updated Potential
                 'AircraftID': ac_id_internal 
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
@@ -208,7 +217,7 @@ def fetch_and_merge_data_v3(end_date):
             defects_list.append({'MergeKey': reg_merge, 'ID': str(r.get('title') or def_id), 'Type': endpoint.split('-')[0].upper(), 'Status': 'Open', 'Description': desc, 'Due Date': d_due})
     df_defects = pd.DataFrame(defects_list)
 
-    # 4. BOOKINGS (UPDATED LOGIC: Future Weeks)
+    # 4. BOOKINGS
     xsrf = t_sess.cookies.get('XSRF-TOKEN')
     t_sess.headers.update({'X-XSRF-TOKEN': urllib.parse.unquote(xsrf), 'Referer': 'https://admin.toran.be/planning', 'Accept': 'application/json'})
     
@@ -227,7 +236,7 @@ def fetch_and_merge_data_v3(end_date):
     now = pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59)
     
-    # CALCULATE WEEKS TO FETCH (Dynamic + Buffer)
+    # Calculate weeks to fetch
     days_diff = (end_dt - now).days
     weeks_to_fetch = max(1, int(days_diff / 7) + 5)
     
@@ -261,19 +270,15 @@ def fetch_and_merge_data_v3(end_date):
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
-        # Drop potential duplicates from overlapping fetches
         df_books = df_books.drop_duplicates(subset=['MergeKey', 'Start'])
         
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
         
-        # Breach date calc (using ALL fetched flights)
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
         
-        # Display DF (Only show flights within the user's selected window)
         df_books_display = df_books[df_books['Start'] <= end_dt]
-        
         usage = df_books_display.groupby('MergeKey')['Planned'].sum().reset_index()
         
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
@@ -293,7 +298,7 @@ def fetch_and_merge_data_v3(end_date):
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
-    # 5. DOCUMENTS (Strict ARC/Insurance Only)
+    # 5. DOCUMENTS
     docs_list = []
     today_date = pd.Timestamp.now().date()
     
@@ -308,11 +313,9 @@ def fetch_and_merge_data_v3(end_date):
                 query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page={page}&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
                 docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
                 
-                if not docs_json or 'resources' not in docs_json or not docs_json['resources']:
-                    break
+                if not docs_json or 'resources' not in docs_json or not docs_json['resources']: break
                 
                 current_batch = docs_json['resources']
-                
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     
@@ -322,24 +325,20 @@ def fetch_and_merge_data_v3(end_date):
                         val = f.get('value')
                         if attr in ['is_active', 'active', 'is_valid']:
                             if val in [False, 0, '0', 'false', 'False', None]:
-                                is_active = False
-                                break
+                                is_active = False; break
                     if not is_active: continue 
 
                     doc_type_val = None
                     for f in r.get('fields', []):
                         if f.get('attribute') in ['document_type', 'type', 'documentType', 'subtype']:
-                            doc_type_val = str(f.get('value') or '').strip()
-                            break
+                            doc_type_val = str(f.get('value') or '').strip(); break
                     
                     doc_final_name = doc_type_val if doc_type_val else str(fields.get('name') or fields.get('filename') or "Document").strip()
                     doc_final_name_lower = doc_final_name.lower()
                     
-                    if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']):
-                        continue
+                    if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']): continue
                     
                     doc_date = None
-                    
                     def parse_date(val):
                         if not val or len(str(val)) < 8: return None
                         val_str = str(val).strip()
@@ -355,9 +354,7 @@ def fetch_and_merge_data_v3(end_date):
                     for k in target_keys:
                         val = fields.get(k)
                         d = parse_date(val)
-                        if d: 
-                            doc_date = d
-                            break
+                        if d: doc_date = d; break
                     
                     if not doc_date:
                         for val in fields.values():
@@ -386,13 +383,7 @@ def fetch_and_merge_data_v3(end_date):
                         elif days_remaining <= 30: status_icon = "🟠" 
                         else: status_icon = "🟢" 
                     
-                    docs_list.append({
-                        'MergeKey': ac_key, 
-                        'Document': doc_final_name, 
-                        'Due Date': doc_date,
-                        'Days Left': days_remaining,
-                        'Status': status_icon
-                    })
+                    docs_list.append({'MergeKey': ac_key, 'Document': doc_final_name, 'Due Date': doc_date, 'Days Left': days_remaining, 'Status': status_icon})
                 
                 if len(current_batch) == 0: break
                 page += 1
@@ -441,7 +432,6 @@ if df is not None:
     today = pd.Timestamp.now().normalize()
     end_dt_ts = pd.to_datetime(selected_date)
     
-    # Global Alerts (Updated: Red if date exceeded, Orange if within 30 days)
     for _, r in df.iterrows():
         if r['Forecast'] < 0:
             msg = f"🛑 **GROUNDING:** {r['Registration']} breach on {r['Breach Date'].strftime('%d %b') if pd.notnull(r.get('Breach Date')) else 'Today'}!"
@@ -501,7 +491,6 @@ if df is not None:
                     else:
                         st.success(f"**Calendar Limit:** {ac_df['Due Date'].strftime('%d %b %Y')} ({days} days left)")
                 
-                # --- UPDATED BREACH DISPLAY ---
                 if pd.notnull(ac_df.get('Breach Date')):
                     b_date = ac_df['Breach Date']
                     if b_date <= end_dt_ts:
