@@ -110,14 +110,12 @@ def render_overhaul_bar(current, limit, label):
 
 # --- VISUAL DOWNLOADER LOGIC ---
 def get_historical_rates_interactive():
-    # Check Session State First
     if 'seasonal_rates' in st.session_state:
         return st.session_state['seasonal_rates'], st.session_state['global_rates']
 
     seasonal_rates = {}
     global_rates = {}
     
-    # STATUS BOX
     with st.status("📥 Downloading Flight History...", expanded=True) as status:
         st.write("Authenticating...")
         f_sess = get_authenticated_session("https://toran.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
@@ -128,21 +126,16 @@ def get_historical_rates_interactive():
 
         raw_hist = []
         page = 1
-        
-        # Progress Bar
         prog_bar = st.progress(0)
         
         while True:
             st.write(f"Fetching page {page} (100 flights/page)...")
             try:
                 h_flights = fetch_resource(f_sess, "https://toran.flightapp.be", f"flights?perPage=100&page={page}")
-                if not h_flights or 'resources' not in h_flights or not h_flights['resources']:
-                    break
-                
+                if not h_flights or 'resources' not in h_flights or not h_flights['resources']: break
                 for r in h_flights['resources']:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
                     reg = str(fields.get('aircraft') or "Unk").split(' ')[0]
-                    
                     duration = 0.0
                     raw_dur = fields.get('flight_time') or fields.get('total_time') or fields.get('block_time')
                     if raw_dur:
@@ -152,22 +145,18 @@ def get_historical_rates_interactive():
                         else:
                             try: duration = float(raw_dur) / 60
                             except: pass
-                    
                     f_date = None
                     if fields.get('date'): 
                         try: f_date = pd.to_datetime(fields.get('date')).date()
                         except: pass
-                    
                     if f_date and duration > 0:
                         raw_hist.append({'Reg': normalize_tail(reg), 'Date': f_date, 'Month': f_date.month, 'Hours': duration})
                 
-                # Visual Feedback update
-                prog_bar.progress(min(page / 50, 1.0)) # Assumes ~50 pages max for bar
+                prog_bar.progress(min(page / 50, 1.0))
                 page += 1
-                if page > 50: break # Safety limit 5000 flights
-                
+                if page > 50: break 
             except Exception as e:
-                st.write(f"Error on page {page}: {e}")
+                st.write(f"Error: {e}")
                 break
         
         st.write("Processing statistics...")
@@ -179,7 +168,6 @@ def get_historical_rates_interactive():
                 days = (max_date - min_date).days
                 if days < 1: days = 1
                 global_rates[reg] = group['Hours'].sum() / days
-                
                 seasonal_rates[reg] = {}
                 for month_idx, month_group in group.groupby('Month'):
                     total_h = month_group['Hours'].sum()
@@ -189,8 +177,6 @@ def get_historical_rates_interactive():
                     seasonal_rates[reg][month_idx] = total_h / denom
         
         status.update(label="✅ History Download Complete", state="complete", expanded=False)
-        
-        # Save to Session State
         st.session_state['seasonal_rates'] = seasonal_rates
         st.session_state['global_rates'] = global_rates
         
@@ -198,7 +184,7 @@ def get_historical_rates_interactive():
 
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v11(end_date, seasonal_rates, global_rates):
+def fetch_and_merge_data_v12(end_date, seasonal_rates, global_rates):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -365,7 +351,6 @@ def fetch_and_merge_data_v11(end_date, seasonal_rates, global_rates):
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
         
-        # --- PROJECTED BREACH CALCULATION (SEASONAL) ---
         last_booking = df_books.groupby('MergeKey')['Start'].max().reset_index().rename(columns={'Start': 'LastBookDate'})
         df = pd.merge(df, last_booking, on='MergeKey', how='left')
         
@@ -399,6 +384,7 @@ def fetch_and_merge_data_v11(end_date, seasonal_rates, global_rates):
     df['IntervalSpan'] = df['Interval']
     if 'LastHours' in df.columns:
         mask = df['LastHours'].notna() & (df['Limit'] > df['LastHours'])
+        # Updated Logic: Use accurate interval span for progress bar calculation
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
@@ -501,11 +487,8 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.session_state.clear(); st.rerun()
 
-# 1. Fetch Interactive History
 seasonal_rates, global_rates = get_historical_rates_interactive()
-
-# 2. Fetch Live Data
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v11(selected_date, seasonal_rates, global_rates)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v12(selected_date, seasonal_rates, global_rates)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -593,9 +576,11 @@ if df is not None:
 
             with col_prog:
                 st.subheader("📊 Life Status")
+                
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
-                interval = ac_df['Interval']
+                interval = ac_df['IntervalSpan'] # Use calculated span, not raw interval
+                
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
                 st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
