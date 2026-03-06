@@ -128,7 +128,6 @@ def render_progress_bar(normal_rem, tol_rem, interval):
 @st.cache_data(ttl=300)
 def fetch_and_merge_data_v6(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
-    # FIXED SYNTAX HERE: Added closing bracket after TORAN_EMAIL
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
@@ -303,7 +302,10 @@ def fetch_and_merge_data_v6(end_date):
                     if not guest and f.get('customer_id'): guest = cust_map.get(str(f.get('customer_id')), '')
                     if not guest: guest = str(f.get('title', 'Guest'))
                     inst = pilot_map.get(str(f.get('instructor_id')), 'Toran Team')
-                    if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': (end - start).total_seconds() / 3600 * 0.85, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': guest, 'Instructor': inst, 'Departure': f.get('departure_airport_name', 'EBKT')})
+                    if reg: 
+                        # UPDATED CORRECTION FACTOR TO 0.60
+                        planned_hours = (end - start).total_seconds() / 3600 * 0.60
+                        book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': planned_hours, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': guest, 'Instructor': inst, 'Departure': f.get('departure_airport_name', 'EBKT')})
         except: pass
 
     df_books = pd.DataFrame(book_list)
@@ -528,18 +530,11 @@ if df is not None:
                     days_rem_total = (cal_due - today.date()).days
                     
                     if days_rem_total > 0:
-                        # Split into Normal and Tolerance days
-                        # Due Date already includes Tolerance.
-                        # So if we have 40 days left and tolerance is 30:
-                        # Normal = 10, Tol = 30
-                        
                         cal_normal_rem = max(0, days_rem_total - cal_tol)
                         cal_tol_rem = min(cal_tol, days_rem_total)
                         
-                        # Span Calculation (Use Last Date or default 365)
-                        span = 365 # Default
+                        span = 365 
                         if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
-                            # Calculate theoretical span (Last -> Due)
                             span = (cal_due - ac_df['LastDate']).days
                             if span <= 0: span = 365
                         
