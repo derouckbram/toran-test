@@ -125,8 +125,9 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     st.markdown(html, unsafe_allow_html=True)
 
 # --- MASTER LOGIC ---
+# Renamed to V5 to force cache invalidation
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v4(end_date):
+def fetch_and_merge_data_v5(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -155,7 +156,7 @@ def fetch_and_merge_data_v4(end_date):
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
-            # --- EXCEEDANCE ---
+            # --- HOURS EXCEEDANCE ---
             try: exceedance = float(str(fields.get('max_hours_exceedence', 0)).replace(',', ''))
             except: exceedance = 0.0
             
@@ -167,10 +168,23 @@ def fetch_and_merge_data_v4(end_date):
             except: interval = 100.0
             if interval <= 0: interval = 100.0 
 
+            # --- CALENDAR EXCEEDANCE & DUE DATE ---
+            # Parse tolerance days
+            try:
+                cal_exc_raw = str(fields.get('max_valid_until_exceedence', 0))
+                cal_exc_days = float(cal_exc_raw.replace(',', ''))
+            except:
+                cal_exc_days = 0.0
+
             due_date = None
             raw_date = fields.get('max_valid_until')
             if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
-                try: due_date = pd.to_datetime(str(raw_date)).date()
+                try: 
+                    d_obj = pd.to_datetime(str(raw_date))
+                    # Add Calendar Tolerance if present
+                    if cal_exc_days > 0:
+                        d_obj = d_obj + timedelta(days=int(cal_exc_days))
+                    due_date = d_obj.date()
                 except: pass
 
             ac_data.append({
@@ -315,10 +329,8 @@ def fetch_and_merge_data_v4(end_date):
     df['Forecast'] = df['Potential'] - df['Planned']
     
     # --- RESTORED: Standard Percentage Calculation for Fleet Summary Table ---
-    # This ensures the standard progress bars in the main table still work
     df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
     df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
-    
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
     df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
 
@@ -415,7 +427,7 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v4(selected_date)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v5(selected_date)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -500,9 +512,7 @@ if df is not None:
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
                 
-                # Normal Remaining = Total Potential - Exceedance
                 normal_rem = max(0.0, total_potential - exceedance)
-                # Tolerance Remaining = Remainder (either part or full exceedance)
                 tol_rem = min(exceedance, total_potential)
                 
                 st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
