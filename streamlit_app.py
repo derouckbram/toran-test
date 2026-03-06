@@ -108,81 +108,97 @@ def render_overhaul_bar(current, limit, label):
     rem_pct = 100.0 - pct
     st.markdown(f"""<div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left)</div><div class="oh-bar-container"><div class="oh-bar-fill" style="width: {pct}%;"></div></div>""", unsafe_allow_html=True)
 
-# --- HEAVY CACHE: HISTORICAL DATA ---
-# This runs ONCE every 24 hours (86400 seconds)
-@st.cache_data(ttl=86400, show_spinner="Downloading full flight history (One-time)...")
-def fetch_historical_rates():
-    # We need a fresh session here since we can't pickle the session object easily in cache
-    f_sess = get_authenticated_session("https://toran.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
-    if not f_sess: return {}, {}
+# --- VISUAL DOWNLOADER LOGIC ---
+def get_historical_rates_interactive():
+    # Check Session State First
+    if 'seasonal_rates' in st.session_state:
+        return st.session_state['seasonal_rates'], st.session_state['global_rates']
 
-    raw_hist = []
-    page = 1
-    
-    # Loop until we have everything or hit a safety limit (e.g. 50 pages = 2500 flights)
-    # Adjust 50 to higher if you have more flights
-    while True:
-        try:
-            h_flights = fetch_resource(f_sess, "https://toran.flightapp.be", f"flights?perPage=50&page={page}")
-            if not h_flights or 'resources' not in h_flights or not h_flights['resources']:
-                break
-            
-            for r in h_flights['resources']:
-                fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-                reg = str(fields.get('aircraft') or "Unk").split(' ')[0]
-                
-                duration = 0.0
-                raw_dur = fields.get('flight_time') or fields.get('total_time') or fields.get('block_time')
-                if raw_dur:
-                    if isinstance(raw_dur, str) and ':' in raw_dur:
-                        h, m = map(int, raw_dur.split(':'))
-                        duration = h + (m/60)
-                    else:
-                        try: duration = float(raw_dur) / 60
-                        except: pass
-                
-                f_date = None
-                if fields.get('date'): 
-                    try: f_date = pd.to_datetime(fields.get('date')).date()
-                    except: pass
-                
-                if f_date and duration > 0:
-                    raw_hist.append({'Reg': normalize_tail(reg), 'Date': f_date, 'Month': f_date.month, 'Hours': duration})
-            
-            page += 1
-            if page > 100: break # Safety break at ~5000 flights
-        except: break
-
-    # Process Rates
     seasonal_rates = {}
     global_rates = {}
     
-    if raw_hist:
-        df_hist = pd.DataFrame(raw_hist)
-        for reg, group in df_hist.groupby('Reg'):
-            # Global Average
-            min_date = group['Date'].min()
-            max_date = group['Date'].max()
-            days = (max_date - min_date).days
-            if days < 1: days = 1
-            global_rates[reg] = group['Hours'].sum() / days
-            
-            # Seasonal (Monthly)
-            seasonal_rates[reg] = {}
-            for month_idx, month_group in group.groupby('Month'):
-                total_h = month_group['Hours'].sum()
-                # Estimate: Total Hours / (Years of data * 30.4 days)
-                # Count unique YYYY-MM periods to find how many "Julys" we have
-                unique_periods = month_group['Date'].apply(lambda x: x.strftime('%Y-%m')).nunique()
-                if unique_periods < 1: unique_periods = 1
-                denom = unique_periods * 30.4
-                seasonal_rates[reg][month_idx] = total_h / denom
+    # STATUS BOX
+    with st.status("📥 Downloading Flight History...", expanded=True) as status:
+        st.write("Authenticating...")
+        f_sess = get_authenticated_session("https://toran.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
+        
+        if not f_sess:
+            status.update(label="Authentication Failed", state="error")
+            return {}, {}
+
+        raw_hist = []
+        page = 1
+        
+        # Progress Bar
+        prog_bar = st.progress(0)
+        
+        while True:
+            st.write(f"Fetching page {page} (100 flights/page)...")
+            try:
+                h_flights = fetch_resource(f_sess, "https://toran.flightapp.be", f"flights?perPage=100&page={page}")
+                if not h_flights or 'resources' not in h_flights or not h_flights['resources']:
+                    break
                 
+                for r in h_flights['resources']:
+                    fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
+                    reg = str(fields.get('aircraft') or "Unk").split(' ')[0]
+                    
+                    duration = 0.0
+                    raw_dur = fields.get('flight_time') or fields.get('total_time') or fields.get('block_time')
+                    if raw_dur:
+                        if isinstance(raw_dur, str) and ':' in raw_dur:
+                            h, m = map(int, raw_dur.split(':'))
+                            duration = h + (m/60)
+                        else:
+                            try: duration = float(raw_dur) / 60
+                            except: pass
+                    
+                    f_date = None
+                    if fields.get('date'): 
+                        try: f_date = pd.to_datetime(fields.get('date')).date()
+                        except: pass
+                    
+                    if f_date and duration > 0:
+                        raw_hist.append({'Reg': normalize_tail(reg), 'Date': f_date, 'Month': f_date.month, 'Hours': duration})
+                
+                # Visual Feedback update
+                prog_bar.progress(min(page / 50, 1.0)) # Assumes ~50 pages max for bar
+                page += 1
+                if page > 50: break # Safety limit 5000 flights
+                
+            except Exception as e:
+                st.write(f"Error on page {page}: {e}")
+                break
+        
+        st.write("Processing statistics...")
+        if raw_hist:
+            df_hist = pd.DataFrame(raw_hist)
+            for reg, group in df_hist.groupby('Reg'):
+                min_date = group['Date'].min()
+                max_date = group['Date'].max()
+                days = (max_date - min_date).days
+                if days < 1: days = 1
+                global_rates[reg] = group['Hours'].sum() / days
+                
+                seasonal_rates[reg] = {}
+                for month_idx, month_group in group.groupby('Month'):
+                    total_h = month_group['Hours'].sum()
+                    unique_periods = month_group['Date'].apply(lambda x: x.strftime('%Y-%m')).nunique()
+                    if unique_periods < 1: unique_periods = 1
+                    denom = unique_periods * 30.4
+                    seasonal_rates[reg][month_idx] = total_h / denom
+        
+        status.update(label="✅ History Download Complete", state="complete", expanded=False)
+        
+        # Save to Session State
+        st.session_state['seasonal_rates'] = seasonal_rates
+        st.session_state['global_rates'] = global_rates
+        
     return seasonal_rates, global_rates
 
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v10(end_date, seasonal_rates, global_rates):
+def fetch_and_merge_data_v11(end_date, seasonal_rates, global_rates):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -354,28 +370,23 @@ def fetch_and_merge_data_v10(end_date, seasonal_rates, global_rates):
         df = pd.merge(df, last_booking, on='MergeKey', how='left')
         
         for idx, row in df.iterrows():
-            if pd.isnull(row.get('Breach Date')): # Only if no hard breach confirmed
+            if pd.isnull(row.get('Breach Date')): 
                 reg_key = row['MergeKey']
                 remaining = row['Potential'] - row['Planned']
-                
-                # Check if we have rates for this aircraft
                 fallback_rate = global_rates.get(reg_key, 0)
                 
                 if remaining > 0 and fallback_rate > 0:
                     sim_date = row['LastBookDate'] if pd.notnull(row.get('LastBookDate')) else now
                     days_counter = 0
-                    
                     while remaining > 0 and days_counter < (365 * 5):
                         sim_date += timedelta(days=1)
                         days_counter += 1
-                        
                         month = sim_date.month
                         daily_consumption = 0
                         if reg_key in seasonal_rates and month in seasonal_rates[reg_key]:
                             daily_consumption = seasonal_rates[reg_key][month]
                         else:
                             daily_consumption = fallback_rate
-                        
                         if daily_consumption <= 0: daily_consumption = 0.1
                         remaining -= daily_consumption
                     
@@ -488,13 +499,13 @@ with st.sidebar:
     st.markdown("### Maintenance Center")
     st.write("Go to **pages/welcome_page** for TV Mode")
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
-    if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
+    if st.button('🔄 Refresh'): st.cache_data.clear(); st.session_state.clear(); st.rerun()
 
-# 1. Fetch History Rates (Cached for 24h)
-seasonal_rates, global_rates = fetch_historical_rates()
+# 1. Fetch Interactive History
+seasonal_rates, global_rates = get_historical_rates_interactive()
 
-# 2. Fetch Live Data (Cached for 5m)
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v10(selected_date, seasonal_rates, global_rates)
+# 2. Fetch Live Data
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v11(selected_date, seasonal_rates, global_rates)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -571,7 +582,6 @@ if df is not None:
                     b_date = ac_df['Breach Date']
                     is_proj = ac_df.get('Is_Projected', False)
                     date_str = b_date.strftime('%d %b %Y')
-                    
                     if is_proj:
                         st.info(f"**ℹ️ Projected Breach (Based on History):** {date_str}")
                     elif b_date <= end_dt_ts:
@@ -583,21 +593,17 @@ if df is not None:
 
             with col_prog:
                 st.subheader("📊 Life Status")
-                
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
-                
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
-                
                 st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
                 render_progress_bar(normal_rem, tol_rem, interval)
                 
                 forecast_total = ac_df['Forecast']
                 forecast_normal = max(0.0, forecast_total - exceedance)
                 forecast_tol = min(exceedance, forecast_total)
-                
                 st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):** (Total: {forecast_total:.1f}h)")
                 render_progress_bar(forecast_normal, forecast_tol, interval)
                 
