@@ -31,11 +31,33 @@ def get_ebkt_weather():
 
 weather = get_ebkt_weather()
 
-# --- Aircraft Image Database ---
+# --- Aircraft Image & Cardex Database ---
+# UPDATED: Added Major Overhaul (12Y/2200H) data extracted from Cardex
 AIRCRAFT_DB = {
-    "OOHXP": {"model": "Robinson R44 Raven II", "image": "raven2.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOMOO": {"model": "Robinson R44 Raven I", "image": "raven1.jpg", "seats": "4 Seats", "cruise": "109 kts"},
-    "OOSKH": {"model": "Guimbal Cabri G2", "image": "cabri.jpg", "seats": "2 Seats", "cruise": "90 kts"}
+    "OOHXP": {
+        "model": "Robinson R44 Raven II", "image": "raven2.jpg", 
+        "seats": "4 Seats", "cruise": "109 kts",
+        "overhaul_install": datetime(2018, 1, 26).date(), # 12Y Start
+        "overhaul_limit_h": 2200 # Hours Limit
+    },
+    "OOMOO": {
+        "model": "Robinson R44 Raven I", "image": "raven1.jpg", 
+        "seats": "4 Seats", "cruise": "109 kts",
+        "overhaul_install": datetime(2019, 10, 2).date(), 
+        "overhaul_limit_h": 2200
+    },
+    "OOTOA": {  # Added TOA based on Cardex
+        "model": "Robinson R44 Raven II", "image": "raven2.jpg", 
+        "seats": "4 Seats", "cruise": "109 kts",
+        "overhaul_install": datetime(2013, 12, 3).date(), 
+        "overhaul_limit_h": 2200
+    },
+    "OOSKH": {
+        "model": "Guimbal Cabri G2", "image": "cabri.jpg", 
+        "seats": "2 Seats", "cruise": "90 kts",
+        "overhaul_install": None, # Fill if available
+        "overhaul_limit_h": 2200
+    }
 }
 
 # --- Style Engine ---
@@ -64,16 +86,12 @@ def apply_toran_style():
             margin-bottom: 5px;
             border: 1px solid #e0e0e0;
         }
-        .toran-bar-normal {
-            background-color: #E4D18C; /* Toran Gold */
-            height: 100%;
-            transition: width 0.5s ease-in-out;
-        }
-        .toran-bar-tol {
-            background-color: #FF8C00; /* Dark Orange */
-            height: 100%;
-            transition: width 0.5s ease-in-out;
-        }
+        .toran-bar-normal { background-color: #E4D18C; height: 100%; transition: width 0.5s ease-in-out; }
+        .toran-bar-tol { background-color: #FF8C00; height: 100%; transition: width 0.5s ease-in-out; }
+        
+        /* Overhaul Bar Styles (Darker/Different) */
+        .oh-bar-container { width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 12px; overflow: hidden; margin-top: 2px; }
+        .oh-bar-fill { background-color: #666666; height: 100%; }
         </style>
         """, unsafe_allow_html=True
     )
@@ -124,9 +142,22 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     """
     st.markdown(html, unsafe_allow_html=True)
 
+def render_overhaul_bar(current, limit, label):
+    if limit <= 0: return
+    pct = min(100.0, (current / limit) * 100)
+    rem_pct = 100.0 - pct
+    
+    html = f"""
+    <div style="font-size: 12px; margin-top: 8px; color: #666;">{label}: {current:.1f} / {limit:.0f} ({rem_pct:.1f}% left)</div>
+    <div class="oh-bar-container">
+        <div class="oh-bar-fill" style="width: {pct}%;"></div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v6(end_date):
+def fetch_and_merge_data_v7(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -168,7 +199,6 @@ def fetch_and_merge_data_v6(end_date):
             if interval <= 0: interval = 100.0 
 
             # --- CALENDAR EXCEEDANCE & DUE DATE ---
-            # Parse tolerance days
             try:
                 cal_exc_raw = str(fields.get('max_valid_until_exceedence', 0))
                 cal_exc_days = float(cal_exc_raw.replace(',', ''))
@@ -180,7 +210,6 @@ def fetch_and_merge_data_v6(end_date):
             if raw_date and str(raw_date).strip() not in ["", "—", "None", "null"]:
                 try: 
                     d_obj = pd.to_datetime(str(raw_date))
-                    # Add Calendar Tolerance if present
                     if cal_exc_days > 0:
                         d_obj = d_obj + timedelta(days=int(cal_exc_days))
                     due_date = d_obj.date()
@@ -192,7 +221,7 @@ def fetch_and_merge_data_v6(end_date):
                 'Potential': final_potential, 'Due Date': due_date,
                 'AircraftID': ac_id_internal,
                 'Exceedance': exceedance,
-                'CalExceedance': cal_exc_days # Store Calendar Exceedance for UI
+                'CalExceedance': cal_exc_days
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -228,7 +257,7 @@ def fetch_and_merge_data_v6(end_date):
                             val_str = str(v).replace(',', '')
                             if re.match(r'^\d+(\.\d{1,2})?$', val_str):
                                 val = float(val_str)
-                                if 500 < val < 15000: # Broad sanity check
+                                if 500 < val < 15000:
                                     hist_hours = val
                                     break
                         except: pass
@@ -303,7 +332,6 @@ def fetch_and_merge_data_v6(end_date):
                     if not guest: guest = str(f.get('title', 'Guest'))
                     inst = pilot_map.get(str(f.get('instructor_id')), 'Toran Team')
                     if reg: 
-                        # UPDATED CORRECTION FACTOR TO 0.60
                         planned_hours = (end - start).total_seconds() / 3600 * 0.60
                         book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': planned_hours, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': guest, 'Instructor': inst, 'Departure': f.get('departure_airport_name', 'EBKT')})
         except: pass
@@ -330,8 +358,6 @@ def fetch_and_merge_data_v6(end_date):
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
-    
-    # --- RESTORED: Standard Percentage Calculation for Fleet Summary Table ---
     df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
     df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
     df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
@@ -430,7 +456,7 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v6(selected_date)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v7(selected_date)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -511,45 +537,60 @@ if df is not None:
             with col_prog:
                 st.subheader("📊 Life Status")
                 
+                # --- Next Inspection (Normal + Tolerance) ---
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
-                
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
-                
-                st.write(f"**Life Remaining NOW (Hours):** (Total: {total_potential:.1f}h)")
+                st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
                 render_progress_bar(normal_rem, tol_rem, interval)
                 
-                # --- NEW: Calendar Bar ---
+                forecast_total = ac_df['Forecast']
+                forecast_normal = max(0.0, forecast_total - exceedance)
+                forecast_tol = min(exceedance, forecast_total)
+                st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):** (Total: {forecast_total:.1f}h)")
+                render_progress_bar(forecast_normal, forecast_tol, interval)
+                
+                # --- CALENDAR BAR ---
                 if pd.notnull(ac_df['Due Date']):
                     cal_due = ac_df['Due Date']
                     cal_tol = ac_df.get('CalExceedance', 0.0)
-                    
-                    # Days Remaining NOW
                     days_rem_total = (cal_due - today.date()).days
-                    
                     if days_rem_total > 0:
                         cal_normal_rem = max(0, days_rem_total - cal_tol)
                         cal_tol_rem = min(cal_tol, days_rem_total)
-                        
                         span = 365 
                         if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
                             span = (cal_due - ac_df['LastDate']).days
                             if span <= 0: span = 365
-                        
                         st.write(f"**Life Remaining NOW (Calendar):** (Total: {int(days_rem_total)} days)")
                         render_progress_bar(cal_normal_rem, cal_tol_rem, span)
                     else:
                         st.error("**Calendar Life Expired**")
 
+                # --- MAJOR OVERHAUL TRACKER (Extracted from Cardex) ---
+                st.markdown("---")
+                st.write("**🏗️ Major Overhaul Tracker (2200h / 12Y)**")
                 
-                forecast_total = ac_df['Forecast']
-                forecast_normal = max(0.0, forecast_total - exceedance)
-                forecast_tol = min(exceedance, forecast_total)
-                
-                st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):** (Total: {forecast_total:.1f}h)")
-                render_progress_bar(forecast_normal, forecast_tol, interval)
+                ac_meta = AIRCRAFT_DB.get(normalize_tail(tail))
+                if ac_meta:
+                    # 1. 2200h Bar
+                    oh_limit_h = ac_meta.get('overhaul_limit_h', 2200)
+                    oh_current = ac_df['Current']
+                    render_overhaul_bar(oh_current, oh_limit_h, "Airframe Hours")
+                    
+                    # 2. 12Y Bar
+                    install_date = ac_meta.get('overhaul_install')
+                    if install_date:
+                        due_12y = install_date + timedelta(days=365*12)
+                        total_days_12y = (due_12y - install_date).days
+                        used_days = (today.date() - install_date).days
+                        render_overhaul_bar(used_days, total_days_12y, f"Calendar 12Y (Due {due_12y.strftime('%d %b %Y')})")
+                    else:
+                        st.caption("No 12Y Installation Date in Database")
+                else:
+                    st.caption("Aircraft not in static DB")
 
             st.markdown("---")
             
