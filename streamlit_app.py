@@ -52,6 +52,28 @@ def apply_toran_style():
         [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
         [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
         .stProgress > div > div > div > div { background-color: #E4D18C !important; }
+        
+        /* Custom Progress Bar Styles */
+        .toran-progress-container {
+            width: 100%;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            height: 20px;
+            display: flex;
+            overflow: hidden;
+            margin-bottom: 5px;
+            border: 1px solid #e0e0e0;
+        }
+        .toran-bar-normal {
+            background-color: #E4D18C; /* Toran Gold */
+            height: 100%;
+            transition: width 0.5s ease-in-out;
+        }
+        .toran-bar-tol {
+            background-color: #FF8C00; /* Dark Orange */
+            height: 100%;
+            transition: width 0.5s ease-in-out;
+        }
         </style>
         """, unsafe_allow_html=True
     )
@@ -88,9 +110,26 @@ def normalize_tail(tail):
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
+# --- CUSTOM PROGRESS BAR RENDERER ---
+def render_progress_bar(normal_rem, tol_rem, interval):
+    if interval <= 0: interval = 100 # Avoid division by zero
+    
+    # Calculate percentages relative to the INTERVAL
+    pct_normal = max(0.0, min(100.0, (normal_rem / interval) * 100))
+    pct_tol = max(0.0, min(100.0, (tol_rem / interval) * 100))
+    
+    # Create HTML structure
+    html = f"""
+    <div class="toran-progress-container" title="Normal: {normal_rem:.1f}h | Tolerance: {tol_rem:.1f}h">
+        <div class="toran-bar-normal" style="width: {pct_normal}%;"></div>
+        <div class="toran-bar-tol" style="width: {pct_tol}%;"></div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 # --- MASTER LOGIC ---
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v3(end_date):
+def fetch_and_merge_data_v4(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
     t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
 
@@ -114,19 +153,16 @@ def fetch_and_merge_data_v3(end_date):
                     ac_id_internal = f_raw.get('belongsToId')
                     break
 
-            # Current & Limit
             try: curr_val = float(str(fields.get('current_hours_ttsn', 0)).replace(',', ''))
             except: curr_val = 0.0
             try: limit_val = float(str(fields.get('max_hours', 0)).replace(',', ''))
             except: limit_val = 0.0
             
-            # --- NEW: EXCEEDANCE HANDLING ---
+            # --- EXCEEDANCE (TOLERANCE) ---
             try: exceedance = float(str(fields.get('max_hours_exceedence', 0)).replace(',', ''))
             except: exceedance = 0.0
             
-            # Calculate Base Potential
             base_potential = limit_val - curr_val
-            # Add tolerance if available
             final_potential = max(0.0, base_potential + exceedance)
 
             maint_type_str = str(fields.get('aircraftMaintenanceType', "Standard"))
@@ -143,8 +179,9 @@ def fetch_and_merge_data_v3(end_date):
             ac_data.append({
                 'Registration': reg_display, 'MergeKey': reg_merge, 'Current': curr_val, 
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
-                'Potential': final_potential, 'Due Date': due_date, # Updated Potential
-                'AircraftID': ac_id_internal 
+                'Potential': final_potential, 'Due Date': due_date,
+                'AircraftID': ac_id_internal,
+                'Exceedance': exceedance # Stored for UI Logic
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -235,11 +272,8 @@ def fetch_and_merge_data_v3(end_date):
 
     now = pd.Timestamp.utcnow().tz_localize(None)
     end_dt = pd.to_datetime(end_date).replace(hour=23, minute=59)
-    
-    # Calculate weeks to fetch
     days_diff = (end_dt - now).days
     weeks_to_fetch = max(1, int(days_diff / 7) + 5)
-    
     book_list = []
     
     for i in range(weeks_to_fetch): 
@@ -251,36 +285,25 @@ def fetch_and_merge_data_v3(end_date):
                 if f.get('status') == 'confirmed':
                     start = pd.to_datetime(f.get('reserved_start_datetime')).tz_convert(None)
                     end = pd.to_datetime(f.get('reserved_end_datetime')).tz_convert(None)
-                    
                     if start < now: continue
-                    
                     reg = id_map.get(str(f.get('heli_id', '')))
                     guest = f"{f.get('customer_first_name','')} {f.get('customer_last_name','')}".strip()
                     if not guest and f.get('customer_id'): guest = cust_map.get(str(f.get('customer_id')), '')
                     if not guest: guest = str(f.get('title', 'Guest'))
                     inst = pilot_map.get(str(f.get('instructor_id')), 'Toran Team')
-
-                    if reg: book_list.append({
-                        'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 
-                        'Planned': (end - start).total_seconds() / 3600 * 0.85, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 
-                        'Details': guest, 'Instructor': inst, 'Departure': f.get('departure_airport_name', 'EBKT')
-                    })
+                    if reg: book_list.append({'MergeKey': normalize_tail(reg), 'Registration': reg, 'Start': start, 'End': end, 'Planned': (end - start).total_seconds() / 3600 * 0.85, 'Type': str(f.get('booking_type', 'Flight')).capitalize(), 'Details': guest, 'Instructor': inst, 'Departure': f.get('departure_airport_name', 'EBKT')})
         except: pass
 
     df_books = pd.DataFrame(book_list)
     if not df_books.empty:
         df_books = df_books.sort_values(['MergeKey', 'Start'])
         df_books = df_books.drop_duplicates(subset=['MergeKey', 'Start'])
-        
         df_books['Cumulative'] = df_books.groupby('MergeKey')['Planned'].cumsum()
         df_books = pd.merge(df_books, df_ac[['MergeKey', 'Potential']], on='MergeKey', how='left')
         df_books['Is_Breach'] = df_books['Cumulative'] > df_books['Potential']
-        
         breach_dates = df_books[df_books['Is_Breach']].groupby('MergeKey')['Start'].min().reset_index().rename(columns={'Start': 'Breach Date'})
-        
         df_books_display = df_books[df_books['Start'] <= end_dt]
         usage = df_books_display.groupby('MergeKey')['Planned'].sum().reset_index()
-        
         df = pd.merge(df_ac, usage, on='MergeKey', how='left').fillna({'Planned': 0})
         df = pd.merge(df, breach_dates, on='MergeKey', how='left')
     else:
@@ -293,10 +316,7 @@ def fetch_and_merge_data_v3(end_date):
         df.loc[mask, 'IntervalSpan'] = df.loc[mask, 'Limit'] - df.loc[mask, 'LastHours']
 
     df['Forecast'] = df['Potential'] - df['Planned']
-    df['Life Now %'] = (df['Potential'] / df['IntervalSpan']) * 100
-    df['Life Now %'] = df['Life Now %'].fillna(0).clip(0, 100)
-    df['Life Forecast %'] = (df['Forecast'] / df['IntervalSpan']) * 100
-    df['Life Forecast %'] = df['Life Forecast %'].fillna(0).clip(0, 100)
+    # Life Now calculation moved to UI section to handle splits
 
     # 5. DOCUMENTS
     docs_list = []
@@ -307,37 +327,28 @@ def fetch_and_merge_data_v3(end_date):
         for ac_record in ac_map:
             ac_key = ac_record['MergeKey']
             ac_id = ac_record['AircraftID']
-            
             page = 1
             while True:
                 query = f"documents?search=&filters=W10%3D&orderBy=&perPage=50&trashed=&page={page}&viaResource=aircraft&viaResourceId={ac_id}&viaRelationship=documents&relationshipType=hasMany"
                 docs_json = fetch_resource(c_sess, "https://toran-camo.flightapp.be", query)
-                
                 if not docs_json or 'resources' not in docs_json or not docs_json['resources']: break
-                
                 current_batch = docs_json['resources']
                 for r in current_batch:
                     fields = {f['attribute']: f['value'] for f in r.get('fields', [])}
-                    
                     is_active = True
                     for f in r.get('fields', []):
                         attr = str(f.get('attribute', '')).lower()
                         val = f.get('value')
                         if attr in ['is_active', 'active', 'is_valid']:
-                            if val in [False, 0, '0', 'false', 'False', None]:
-                                is_active = False; break
+                            if val in [False, 0, '0', 'false', 'False', None]: is_active = False; break
                     if not is_active: continue 
-
                     doc_type_val = None
                     for f in r.get('fields', []):
                         if f.get('attribute') in ['document_type', 'type', 'documentType', 'subtype']:
                             doc_type_val = str(f.get('value') or '').strip(); break
-                    
                     doc_final_name = doc_type_val if doc_type_val else str(fields.get('name') or fields.get('filename') or "Document").strip()
                     doc_final_name_lower = doc_final_name.lower()
-                    
                     if not any(kw in doc_final_name_lower for kw in ['review', 'arc', 'insur', 'verzekering', 'extension']): continue
-                    
                     doc_date = None
                     def parse_date(val):
                         if not val or len(str(val)) < 8: return None
@@ -349,19 +360,16 @@ def fetch_and_merge_data_v3(end_date):
                         try: return datetime.strptime(val_str, '%d-%m-%Y').date()
                         except: pass
                         return None
-
                     target_keys = ['valid_to', 'valid_until', 'expiry_date', 'due_date', 'vervaldatum', 'einddatum', 'date', 'geldig_tot', 'valid_from', 'issue_date']
                     for k in target_keys:
                         val = fields.get(k)
                         d = parse_date(val)
                         if d: doc_date = d; break
-                    
                     if not doc_date:
                         for val in fields.values():
                             if isinstance(val, str) and (len(val) == 10 or len(val) == 9):
                                 d = parse_date(val)
                                 if d: doc_date = d; break
-
                     if not doc_date:
                         doc_id = r.get('id', {}).get('value') if isinstance(r.get('id'), dict) else r.get('id')
                         if doc_id:
@@ -375,16 +383,13 @@ def fetch_and_merge_data_v3(end_date):
                                     for val in det_fields.values():
                                         d = parse_date(val)
                                         if d: doc_date = d; break
-
                     days_remaining = (doc_date - today_date).days if doc_date else None
                     status_icon = "❓"
                     if days_remaining is not None:
                         if days_remaining < 0: status_icon = "🔴" 
                         elif days_remaining <= 30: status_icon = "🟠" 
                         else: status_icon = "🟢" 
-                    
                     docs_list.append({'MergeKey': ac_key, 'Document': doc_final_name, 'Due Date': doc_date, 'Days Left': days_remaining, 'Status': status_icon})
-                
                 if len(current_batch) == 0: break
                 page += 1
                 if page > 20: break
@@ -397,21 +402,6 @@ def fetch_and_merge_data_v3(end_date):
     
     return df, df_books_display, df_defects, df_docs, weeks_to_fetch
 
-# --- STYLE CSS ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #FFFFFF; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #000000; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; background-color: transparent; }
-    .stTabs [data-baseweb="tab"] { background-color: #FFFFFF; border-radius: 4px !important; padding: 10px 20px !important; border: 1px solid #999999; color: #666666; font-weight: 600; transition: all 0.2s ease; }
-    .stTabs [aria-selected="true"] { background-color: #E4D18C !important; color: #000000 !important; border: 1px solid #E4D18C !important; }
-    [data-testid="metric-container"] { background-color: #FFFFFF; border: 1px solid #999999; border-radius: 8px; padding: 20px; border-left: 5px solid #E4D18C; }
-    [data-testid="stMetricValue"] { font-size: 34px !important; font-weight: 800 !important; color: #000000 !important; }
-    [data-testid="stDataFrame"] { background-color: #FFFFFF; border-radius: 8px; border: 1px solid #999999; }
-    [data-testid="stSidebar"] { background-color: #F8F8F8; border-right: 1px solid #999999; }
-    .stProgress > div > div > div > div { background-color: #E4D18C !important; }
-    </style>
-""", unsafe_allow_html=True)
-
 # --- UI EXECUTION ---
 with st.sidebar:
     try: st.image("Asset 4@4x.jpg", use_container_width=True)
@@ -421,7 +411,7 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v3(selected_date)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v4(selected_date)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -436,7 +426,6 @@ if df is not None:
         if r['Forecast'] < 0:
             msg = f"🛑 **GROUNDING:** {r['Registration']} breach on {r['Breach Date'].strftime('%d %b') if pd.notnull(r.get('Breach Date')) else 'Today'}!"
             st.error(msg, icon="🛑")
-        
         if pd.notnull(r['Due Date']):
             days_left = (r['Due Date'] - today.date()).days
             if days_left < 0:
@@ -448,12 +437,10 @@ if df is not None:
     
     with tabs[0]:
         st.subheader("Fleet Summary")
-        cols = ['Registration', 'Type', 'Current', 'Potential', 'Life Now %', 'Planned', 'Forecast', 'Life Forecast %', 'Due Date']
+        cols = ['Registration', 'Type', 'Current', 'Potential', 'Planned', 'Forecast', 'Due Date']
         if 'LastDate' in df.columns: cols.extend(['LastDate', 'LastType', 'LastHours'])
         st.dataframe(df[cols], 
                      column_config={
-                         "Life Now %": st.column_config.ProgressColumn("Life Remaining", format="%.0f%%", min_value=0, max_value=100),
-                         "Life Forecast %": st.column_config.ProgressColumn("Life at Forecast", format="%.0f%%", min_value=0, max_value=100),
                          "Due Date": st.column_config.DateColumn("Due Date", format="DD MMM YYYY"),
                          "LastDate": st.column_config.DateColumn("Last Performed", format="DD MMM YYYY"),
                          "LastHours": st.column_config.NumberColumn("Last TSN", format="%.1f h")
@@ -502,12 +489,31 @@ if df is not None:
 
             with col_prog:
                 st.subheader("📊 Life Status")
-                baseline_txt = f" (Span: {ac_df['IntervalSpan']:.0f}h)"
-                st.write(f"**Life Remaining NOW:**{baseline_txt}")
-                st.progress(int(ac_df['Life Now %']), text=f"{ac_df['Life Now %']:.0f}%")
                 
-                st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):**")
-                st.progress(int(ac_df['Life Forecast %']), text=f"{ac_df['Life Forecast %']:.0f}%")
+                # --- CALCULATE BAR SPLITS (NORMAL vs TOLERANCE) ---
+                total_potential = ac_df['Potential']
+                exceedance = ac_df.get('Exceedance', 0.0)
+                interval = ac_df['Interval']
+                
+                # Normal Remaining: Everything except the tolerance portion
+                # Note: Potential already includes Exceedance.
+                # If Potential > Exceedance, we have Normal time + full tolerance.
+                # If Potential <= Exceedance, we are flying ON tolerance (Normal is 0).
+                
+                normal_rem = max(0.0, total_potential - exceedance)
+                # Tol rem is just the remainder up to the exceedance limit
+                tol_rem = min(exceedance, total_potential)
+                
+                st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
+                render_progress_bar(normal_rem, tol_rem, interval)
+                
+                # Forecast Calculation
+                forecast_total = ac_df['Forecast']
+                forecast_normal = max(0.0, forecast_total - exceedance)
+                forecast_tol = min(exceedance, forecast_total)
+                
+                st.write(f"**Life at Forecast ({selected_date.strftime('%d %b')}):** (Total: {forecast_total:.1f}h)")
+                render_progress_bar(forecast_normal, forecast_tol, interval)
 
             st.markdown("---")
             
@@ -525,15 +531,7 @@ if df is not None:
                 if not df_docs.empty:
                     ac_docs = df_docs[df_docs['MergeKey'] == normalize_tail(tail)]
                     if not ac_docs.empty:
-                        st.dataframe(
-                            ac_docs[['Status', 'Document', 'Due Date', 'Days Left']], 
-                            hide_index=True, 
-                            use_container_width=True, 
-                            column_config={
-                                "Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY"),
-                                "Days Left": st.column_config.NumberColumn("Days Left", format="%d")
-                            }
-                        )
+                        st.dataframe(ac_docs[['Status', 'Document', 'Due Date', 'Days Left']], hide_index=True, use_container_width=True, column_config={"Due Date": st.column_config.DateColumn("Valid Until", format="DD MMM YYYY"), "Days Left": st.column_config.NumberColumn("Days Left", format="%d")})
                     else:
                         st.info("No active ARC or Insurance documents found.")
                 else:
