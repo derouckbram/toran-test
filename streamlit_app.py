@@ -117,7 +117,7 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     pct_tol = max(0.0, min(100.0, (tol_rem / interval) * 100))
     
     html = f"""
-    <div class="toran-progress-container" title="Normal: {normal_rem:.1f}h | Tolerance: {tol_rem:.1f}h">
+    <div class="toran-progress-container" title="Normal: {normal_rem:.1f} | Tolerance: {tol_rem:.1f}">
         <div class="toran-bar-normal" style="width: {pct_normal}%;"></div>
         <div class="toran-bar-tol" style="width: {pct_tol}%;"></div>
     </div>
@@ -125,11 +125,11 @@ def render_progress_bar(normal_rem, tol_rem, interval):
     st.markdown(html, unsafe_allow_html=True)
 
 # --- MASTER LOGIC ---
-# Renamed to V5 to force cache invalidation
+# Renamed to V6 to force cache invalidation
 @st.cache_data(ttl=300)
-def fetch_and_merge_data_v5(end_date):
+def fetch_and_merge_data_v6(end_date):
     c_sess = get_authenticated_session("https://toran-camo.flightapp.be", "/admin/login", st.secrets["CAMO_EMAIL"], st.secrets["CAMO_PASS"])
-    t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL"], st.secrets["TORAN_PASS"])
+    t_sess = get_authenticated_session("https://admin.toran.be", "/login", st.secrets["TORAN_EMAIL", st.secrets["TORAN_PASS"]])
 
     if not c_sess or not t_sess: return None, "Auth Failed", {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 0
 
@@ -192,7 +192,8 @@ def fetch_and_merge_data_v5(end_date):
                 'Limit': limit_val, 'Type': maint_type_str, 'Interval': interval, 
                 'Potential': final_potential, 'Due Date': due_date,
                 'AircraftID': ac_id_internal,
-                'Exceedance': exceedance
+                'Exceedance': exceedance,
+                'CalExceedance': cal_exc_days # Store Calendar Exceedance for UI
             })
     df_ac = pd.DataFrame(ac_data).sort_values('Limit').drop_duplicates('MergeKey')
 
@@ -427,7 +428,7 @@ with st.sidebar:
     selected_date = st.date_input("🗓️ End Date", value=datetime.today() + timedelta(days=35))
     if st.button('🔄 Refresh'): st.cache_data.clear(); st.rerun()
 
-df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v5(selected_date)
+df, raw_books_df, df_defects, df_docs, weeks_scanned = fetch_and_merge_data_v6(selected_date)
 
 with st.sidebar:
     st.caption(f"Scanning {weeks_scanned} weeks ahead for flights.")
@@ -508,6 +509,7 @@ if df is not None:
             with col_prog:
                 st.subheader("📊 Life Status")
                 
+                # Hours Bar
                 total_potential = ac_df['Potential']
                 exceedance = ac_df.get('Exceedance', 0.0)
                 interval = ac_df['Interval']
@@ -515,9 +517,40 @@ if df is not None:
                 normal_rem = max(0.0, total_potential - exceedance)
                 tol_rem = min(exceedance, total_potential)
                 
-                st.write(f"**Life Remaining NOW:** (Total: {total_potential:.1f}h)")
+                st.write(f"**Life Remaining NOW (Hours):** (Total: {total_potential:.1f}h)")
                 render_progress_bar(normal_rem, tol_rem, interval)
                 
+                # --- NEW: Calendar Bar ---
+                if pd.notnull(ac_df['Due Date']):
+                    cal_due = ac_df['Due Date']
+                    cal_tol = ac_df.get('CalExceedance', 0.0)
+                    
+                    # Days Remaining NOW
+                    days_rem_total = (cal_due - today.date()).days
+                    
+                    if days_rem_total > 0:
+                        # Split into Normal and Tolerance days
+                        # Due Date already includes Tolerance.
+                        # So if we have 40 days left and tolerance is 30:
+                        # Normal = 10, Tol = 30
+                        
+                        cal_normal_rem = max(0, days_rem_total - cal_tol)
+                        cal_tol_rem = min(cal_tol, days_rem_total)
+                        
+                        # Span Calculation (Use Last Date or default 365)
+                        span = 365 # Default
+                        if 'LastDate' in ac_df and pd.notnull(ac_df['LastDate']):
+                            # Calculate theoretical span (Last -> Due)
+                            span = (cal_due - ac_df['LastDate']).days
+                            if span <= 0: span = 365
+                        
+                        st.write(f"**Life Remaining NOW (Calendar):** (Total: {int(days_rem_total)} days)")
+                        render_progress_bar(cal_normal_rem, cal_tol_rem, span)
+                    else:
+                        st.error("**Calendar Life Expired**")
+
+                
+                # Forecast Hours Bar
                 forecast_total = ac_df['Forecast']
                 forecast_normal = max(0.0, forecast_total - exceedance)
                 forecast_tol = min(exceedance, forecast_total)
